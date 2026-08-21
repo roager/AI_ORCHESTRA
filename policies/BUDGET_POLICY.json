@@ -1,0 +1,10 @@
+{
+  "policy_version": "0.1",
+  "description": "Provisional AI_ORCHESTRA budget limits for the MVP. Enforced by the Supervisor, not by agents. Reaching a hard limit results in HUMAN_REQUIRED.",
+  "max_total_tokens": 40000,
+  "warning_tokens": 30000,
+  "max_worker_calls": 2,
+  "max_reviewer_calls": 3,
+  "max_correction_rounds": 1,
+  "max_runtime_minutes": 45
+}

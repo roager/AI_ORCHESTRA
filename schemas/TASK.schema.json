@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-orchestra.local/schemas/TASK.schema.json",
+  "title": "AI_ORCHESTRA Task",
+  "description": "Machine-readable definition of a single bounded task delegated to a worker agent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "project",
+    "repository",
+    "branch",
+    "workspace",
+    "objective",
+    "allowed_paths",
+    "forbidden_paths",
+    "acceptance_criteria"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "Unique identifier for the task. Also used as the worktree folder name.",
+      "minLength": 1
+    },
+    "project": {
+      "type": "string",
+      "description": "Logical project the task belongs to, for example PODIUMHUB.",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "string",
+      "description": "Target repository, normally in owner/name form.",
+      "minLength": 1
+    },
+    "branch": {
+      "type": "string",
+      "description": "Task branch the worker must operate on. Must never be a protected branch.",
+      "minLength": 1
+    },
+    "workspace": {
+      "type": "string",
+      "description": "Absolute path of the isolated Git worktree for this task.",
+      "minLength": 1
+    },
+    "objective": {
+      "type": "string",
+      "description": "Concise statement of what the task must achieve.",
+      "minLength": 1
+    },
+    "allowed_paths": {
+      "type": "array",
+      "description": "Repository-relative paths the worker is authorized to modify.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "forbidden_paths": {
+      "type": "array",
+      "description": "Repository-relative paths the worker must not modify.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "description": "Deterministically checkable or reviewable conditions for task completion.",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "test_command": {
+      "type": "string",
+      "description": "Optional test command the Test Validator should execute.",
+      "minLength": 1
+    },
+    "notes": {
+      "type": "string",
+      "description": "Optional additional context for the worker agent."
+    }
+  }
+}

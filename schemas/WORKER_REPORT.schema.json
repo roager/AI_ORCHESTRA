@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-orchestra.local/schemas/WORKER_REPORT.schema.json",
+  "title": "AI_ORCHESTRA Worker Report",
+  "description": "Structured result returned by a worker agent after executing a bounded task. Claims made here must be independently verifiable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "files_changed",
+    "summary"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "description": "Worker self-reported outcome. Not an authorization to publish.",
+      "enum": [
+        "completed",
+        "blocked",
+        "failed"
+      ]
+    },
+    "files_changed": {
+      "type": "array",
+      "description": "Repository-relative paths the worker believes it modified. Verified independently against Git.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "tests": {
+      "type": "object",
+      "description": "Result of the test command executed by the worker, when tests were run.",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "exit_code"
+      ],
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Exact command executed.",
+          "minLength": 1
+        },
+        "exit_code": {
+          "type": "integer",
+          "description": "Process exit code. 0 indicates success."
+        },
+        "passed": {
+          "type": "integer",
+          "description": "Number of passing tests, when the framework reports counts.",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "description": "Number of failing tests, when the framework reports counts.",
+          "minimum": 0
+        }
+      }
+    },
+    "summary": {
+      "type": "string",
+      "description": "Concise description of what was done. Must not contain source-code dumps.",
+      "minLength": 1
+    },
+    "risks": {
+      "type": "array",
+      "description": "Risks the worker identified.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "questions": {
+      "type": "array",
+      "description": "Open questions requiring reviewer or human resolution.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

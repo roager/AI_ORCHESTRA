@@ -1,0 +1,79 @@
+# AI_ORCHESTRA .gitignore
+# Policies, schemas, docs, config and tests are tracked deliberately and must NOT be ignored.
+
+# ---------------------------------------------------------------------------
+# Secrets and credentials
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+secrets/
+**/secrets/
+*.key
+*.pem
+*.pfx
+credentials.json
+*credentials*.json
+*.secret
+*.secrets
+
+# ---------------------------------------------------------------------------
+# Logs and transient run data
+# ---------------------------------------------------------------------------
+*.log
+logs/
+**/logs/
+tmp/
+temp/
+.tmp/
+runs/
+ai-orchestra-runs/
+ai-orchestra-worktrees/
+
+# ---------------------------------------------------------------------------
+# Local caches and local-only overrides
+# ---------------------------------------------------------------------------
+.cache/
+*.local
+*.local.json
+local.settings.json
+
+# ---------------------------------------------------------------------------
+# Python (in case Python tooling is introduced later)
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Node (in case Node tooling is introduced later)
+# ---------------------------------------------------------------------------
+node_modules/
+
+# ---------------------------------------------------------------------------
+# PowerShell / Windows
+# ---------------------------------------------------------------------------
+*.ps1.bak
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ---------------------------------------------------------------------------
+# Editors and OS
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store

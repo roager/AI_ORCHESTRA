@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-orchestra.local/schemas/REVIEW.schema.json",
+  "title": "AI_ORCHESTRA Review",
+  "description": "Independent review of worker output, produced after inspecting actual repository state and validator results.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision",
+    "scope_valid",
+    "tests_valid",
+    "findings",
+    "next_action"
+  ],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "description": "Reviewer verdict for this round.",
+      "enum": [
+        "ACCEPT",
+        "CORRECT",
+        "HUMAN_REQUIRED"
+      ]
+    },
+    "scope_valid": {
+      "type": "boolean",
+      "description": "True when all changed files fall within the task's authorized paths."
+    },
+    "tests_valid": {
+      "type": "boolean",
+      "description": "True when the test evidence is present and acceptable for this task."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Issues identified during review. Empty when nothing was found.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "severity",
+          "issue"
+        ],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "minor",
+              "major",
+              "critical"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "Repository-relative file the finding refers to, when applicable.",
+            "minLength": 1
+          },
+          "issue": {
+            "type": "string",
+            "description": "Concise description of the problem.",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "next_action": {
+      "type": "string",
+      "description": "Action the Supervisor should take next. The Supervisor still enforces policy before acting.",
+      "enum": [
+        "NONE",
+        "CORRECT",
+        "PUBLISH",
+        "HUMAN_REQUIRED"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "Optional concise rationale for the decision."
+    }
+  }
+}
