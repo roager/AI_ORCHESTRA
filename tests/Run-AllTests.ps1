@@ -32,7 +32,7 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host ''
-Write-Host 'AI_ORCHESTRA validator tests' -ForegroundColor White
+Write-Host 'AI_ORCHESTRA validator and worktree tests' -ForegroundColor White
 Write-Host ("PowerShell {0} on {1}" -f $PSVersionTable.PSVersion, [System.Environment]::OSVersion.Platform)
 
 $suites = @(Get-ChildItem -LiteralPath $here -Filter '*.Tests.ps1' -File |
