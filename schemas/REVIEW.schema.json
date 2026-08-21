@@ -65,9 +65,8 @@
     },
     "next_action": {
       "type": "string",
-      "description": "Action the Supervisor should take next. The Supervisor still enforces policy before acting.",
+      "description": "Action the Supervisor should take next. Valid pairings are ACCEPT -> PUBLISH, CORRECT -> CORRECT and HUMAN_REQUIRED -> HUMAN_REQUIRED; any other combination is rejected. The Supervisor still enforces policy before acting.",
       "enum": [
-        "NONE",
         "CORRECT",
         "PUBLISH",
         "HUMAN_REQUIRED"

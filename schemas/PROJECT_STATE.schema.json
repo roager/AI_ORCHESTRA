@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-orchestra.local/schemas/PROJECT_STATE.schema.json",
+  "title": "AI_ORCHESTRA Project State",
+  "description": "Model static and current project configuration needed by the orchestrator.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project_name",
+    "repository",
+    "default_branch",
+    "protected_branches",
+    "source_root",
+    "runtime_worktree_root",
+    "runtime_runs_root",
+    "current_phase"
+  ],
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "description": "Name of the logical project.",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "string",
+      "description": "Target repository path, usually owner/repo.",
+      "minLength": 1
+    },
+    "default_branch": {
+      "type": "string",
+      "description": "The default development branch, e.g. main.",
+      "minLength": 1
+    },
+    "protected_branches": {
+      "type": "array",
+      "description": "List of branches protected from direct pushes or modifications.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "source_root": {
+      "type": "string",
+      "description": "Absolute filesystem path to the AI_ORCHESTRA source root.",
+      "minLength": 1
+    },
+    "runtime_worktree_root": {
+      "type": "string",
+      "description": "Absolute filesystem path to the root directory where run worktrees are created.",
+      "minLength": 1
+    },
+    "runtime_runs_root": {
+      "type": "string",
+      "description": "Absolute filesystem path to the root directory where temporary run data is stored.",
+      "minLength": 1
+    },
+    "current_phase": {
+      "type": "string",
+      "description": "The current phase of the project, e.g., Phase 0.",
+      "minLength": 1
+    }
+  }
+}

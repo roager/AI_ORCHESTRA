@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-orchestra.local/schemas/USAGE.schema.json",
+  "title": "AI_ORCHESTRA Usage",
+  "description": "Model runtime usage and budget observability for a task run.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "worker_calls",
+    "reviewer_calls",
+    "correction_rounds",
+    "runtime_seconds",
+    "total_tokens"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "Identifier of the task this usage data belongs to.",
+      "minLength": 1
+    },
+    "worker_calls": {
+      "type": "integer",
+      "description": "Number of worker agent invocations made during the run.",
+      "minimum": 0
+    },
+    "reviewer_calls": {
+      "type": "integer",
+      "description": "Number of reviewer agent invocations made during the run.",
+      "minimum": 0
+    },
+    "correction_rounds": {
+      "type": "integer",
+      "description": "Number of correction rounds executed during the run.",
+      "minimum": 0
+    },
+    "runtime_seconds": {
+      "type": "integer",
+      "description": "Total execution time of the run in seconds.",
+      "minimum": 0
+    },
+    "total_tokens": {
+      "type": "integer",
+      "description": "Total observed token consumption. May be zero if token usage is unavailable.",
+      "minimum": 0
+    },
+    "by_agent": {
+      "type": "object",
+      "description": "Optional breakdown of token and call consumption per agent.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "calls"
+        ],
+        "properties": {
+          "calls": {
+            "type": "integer",
+            "description": "Number of times this specific agent was invoked.",
+            "minimum": 0
+          },
+          "runtime_seconds": {
+            "type": "integer",
+            "description": "Total runtime in seconds for this agent.",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "description": "Total token consumption for this agent, if available. May be zero.",
+            "minimum": 0
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "description": "Input/prompt token consumption for this agent, if available. May be zero.",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "description": "Output/completion token consumption for this agent, if available. May be zero.",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

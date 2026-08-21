@@ -8,7 +8,7 @@
   "required": [
     "task_id",
     "state",
-    "correction_round",
+    "correction_rounds",
     "worker_calls",
     "reviewer_calls",
     "updated_at"
@@ -38,9 +38,9 @@
         "CANCELLED"
       ]
     },
-    "correction_round": {
+    "correction_rounds": {
       "type": "integer",
-      "description": "Number of correction cycles already consumed.",
+      "description": "Number of correction cycles already consumed. Same counter as correction_rounds in USAGE.schema.json.",
       "minimum": 0
     },
     "worker_calls": {

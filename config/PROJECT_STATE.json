@@ -1,0 +1,12 @@
+{
+  "project_name": "AI_ORCHESTRA",
+  "repository": "roager/AI_ORCHESTRA",
+  "default_branch": "main",
+  "protected_branches": [
+    "main"
+  ],
+  "source_root": "C:\\Users\\roage\\OneDrive\\Documents\\CODE\\AI_ORCHESTRA",
+  "runtime_worktree_root": "C:\\tmp\\ai-orchestra-worktrees",
+  "runtime_runs_root": "C:\\tmp\\ai-orchestra-runs",
+  "current_phase": "Phase 0"
+}

@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-orchestra.local/schemas/HUMAN_DECISION.schema.json",
+  "title": "AI_ORCHESTRA Human Decision",
+  "description": "A recorded human action resolving a HUMAN_REQUIRED escalation. This is the only artifact that may move a run out of HUMAN_REQUIRED. Actions and their transitions are defined in policies/ESCALATION_POLICY.md section 3 and policies/ORCHESTRATOR_POLICY.md section 6.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "action",
+    "actor",
+    "reason",
+    "timestamp"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "Identifier of the task this decision applies to.",
+      "minLength": 1
+    },
+    "action": {
+      "type": "string",
+      "description": "The human action taken. APPROVE resumes at APPROVED; REJECT ends the run as FAILED; MODIFY_SCOPE, INCREASE_BUDGET and RETRY resume the run; CANCEL ends it as CANCELLED.",
+      "enum": [
+        "APPROVE",
+        "REJECT",
+        "MODIFY_SCOPE",
+        "INCREASE_BUDGET",
+        "RETRY",
+        "CANCEL"
+      ]
+    },
+    "actor": {
+      "type": "string",
+      "description": "Who issued the decision. Descriptive only; no identity or authentication model exists yet.",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why the decision was made. Must not contain credentials, tokens or secret values.",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO 8601 timestamp of when the decision was issued.",
+      "format": "date-time"
+    },
+    "resume_state": {
+      "type": "string",
+      "description": "Optional explicit state to resume at. Must be a valid orchestration state, and the resulting HUMAN_REQUIRED -> resume_state transition must still be permitted by ORCHESTRATOR_POLICY.md section 2.1. Omit to use the default re-entry point for the action.",
+      "enum": [
+        "CREATED",
+        "PLANNING",
+        "WORKER_RUNNING",
+        "WORKER_DONE",
+        "VALIDATING",
+        "REVIEWING",
+        "CORRECTION_REQUIRED",
+        "APPROVED",
+        "PUBLISHING",
+        "PUBLISHED",
+        "HUMAN_REQUIRED",
+        "FAILED",
+        "CANCELLED"
+      ]
+    },
+    "budget_override": {
+      "type": "object",
+      "description": "Optional new limits for this run only, used with INCREASE_BUDGET. Does not amend policies/BUDGET_POLICY.json and does not reset consumed counters. Only the keys below are permitted.",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "max_total_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "warning_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_worker_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_reviewer_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_correction_rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_runtime_seconds": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}
