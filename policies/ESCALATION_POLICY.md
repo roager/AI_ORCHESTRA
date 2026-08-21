@@ -35,8 +35,8 @@ trail.
 
 | Trigger | Identifier | Condition | Detected by |
 | --- | --- | --- | --- |
-| Budget exhausted | `budget_exhausted` | Any hard limit in `policies\BUDGET_POLICY.json` is reached: `max_total_tokens`, `max_worker_calls`, `max_reviewer_calls`, `max_runtime_minutes`. | Supervisor |
-| Correction limit reached | `correction_limit_reached` | A correction is requested while `correction_round >= max_correction_rounds`. | Supervisor |
+| Budget exhausted | `budget_exhausted` | Any hard limit in `policies\BUDGET_POLICY.json` is reached: `max_total_tokens`, `max_worker_calls`, `max_reviewer_calls`, `max_runtime_seconds`. | Supervisor |
+| Correction limit reached | `correction_limit_reached` | A correction is requested while `correction_rounds >= max_correction_rounds`. | Supervisor |
 
 Crossing `warning_tokens` is recorded only and does not escalate.
 
@@ -116,7 +116,7 @@ one transition (`ORCHESTRATOR_POLICY.md` Section 6).
 
 Rules:
 
-1. Counters (`worker_calls`, `reviewer_calls`, `correction_round`) are never reset by a human action.
+1. Counters (`worker_calls`, `reviewer_calls`, `correction_rounds`) are never reset by a human action.
    `INCREASE_BUDGET` raises limits; it does not erase consumption.
 2. `INCREASE_BUDGET` does not amend `policies\BUDGET_POLICY.json`. Changing the default policy is a
    separate, deliberate act.
@@ -125,6 +125,10 @@ Rules:
 4. A human action may not be inferred from silence, from an agent's assertion, or from a timeout.
    Absent an action, the run stays halted.
 5. An action that raises a limit or widens scope is itself an auditable event.
+6. A human decision may optionally specify a `resume_state`. The Supervisor must validate it. Safe
+   MVP resume destinations from `HUMAN_REQUIRED` are limited to `PLANNING`, `WORKER_RUNNING`,
+   `VALIDATING`, `REVIEWING`, and `APPROVED`. Direct resume to `PUBLISHING`, `PUBLISHED`, or any
+   other terminal state is forbidden and will be rejected.
 
 ---
 
@@ -140,16 +144,21 @@ evidence (validator output, exit code, changed-file list, artifact reference)
 timestamp
 ```
 
-And on resumption:
+And on resumption, a human decision is recorded as `HUMAN_DECISION.json` at:
+`C:\tmp\ai-orchestra-runs\<run-id>\HUMAN_DECISION.json`
+
+This file conforms to `schemas\HUMAN_DECISION.schema.json` and forms an immutable part of the run's audit trail, documenting:
 
 ```text
 human action
 actor
+reason
 timestamp
-resulting state
+resume_state (optional)
+budget_override (optional)
 ```
 
-Evidence must never contain credentials, tokens or secret values.
+Evidence and decision files must never contain credentials, tokens or secret values.
 
 ---
 
@@ -164,9 +173,6 @@ Open items recorded rather than silently decided:
 2. The protected-branch list is undefined for this repository. `force_push_required` and
    `protected_branch_modification` cannot be enforced deterministically until `GIT_POLICY.md` names
    it.
-3. There is no defined artifact or transport for a human action. `STATUS.json` carries a free-text
-   `reason` field but no structured decision record, so Section 4 describes content without
-   specifying a file. A `DECISION.json` contract would close this and is a prerequisite for a full
-   audit trail.
+3. The human action is codified in `HUMAN_DECISION.json` conforming to `schemas\HUMAN_DECISION.schema.json`.
 4. No identity or authentication model exists for "the human". The `actor` field is descriptive
    only.

@@ -49,19 +49,11 @@
       "type": "string",
       "description": "Optional explicit state to resume at. Must be a valid orchestration state, and the resulting HUMAN_REQUIRED -> resume_state transition must still be permitted by ORCHESTRATOR_POLICY.md section 2.1. Omit to use the default re-entry point for the action.",
       "enum": [
-        "CREATED",
         "PLANNING",
         "WORKER_RUNNING",
-        "WORKER_DONE",
         "VALIDATING",
         "REVIEWING",
-        "CORRECTION_REQUIRED",
-        "APPROVED",
-        "PUBLISHING",
-        "PUBLISHED",
-        "HUMAN_REQUIRED",
-        "FAILED",
-        "CANCELLED"
+        "APPROVED"
       ]
     },
     "budget_override": {

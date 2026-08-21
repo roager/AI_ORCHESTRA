@@ -250,6 +250,7 @@ WORKER_REPORT.json
 REVIEW.json
 RESULT.json
 USAGE.json
+HUMAN_DECISION.json
 ```
 
 Large repository contents should not be copied into these objects.
@@ -522,7 +523,7 @@ Initial provisional limits:
   "max_worker_calls": 2,
   "max_reviewer_calls": 3,
   "max_correction_rounds": 1,
-  "max_runtime_minutes": 45
+  "max_runtime_seconds": 2700
 }
 ```
 
@@ -703,7 +704,7 @@ even if an agent mistakenly requests them.
 
 ---
 
-# 17. Human Escalation
+# 17. Human Escalation & Resumption
 
 At minimum, execution becomes `HUMAN_REQUIRED` when:
 
@@ -721,15 +722,28 @@ At minimum, execution becomes `HUMAN_REQUIRED` when:
 - critical disagreement between agents remains unresolved;
 - requested action exceeds current privilege level.
 
-The human may:
+On resumption, the human action is recorded in `HUMAN_DECISION.json` under:
+`C:\tmp\ai-orchestra-runs\<run-id>\HUMAN_DECISION.json`
 
-- approve;
-- reject;
-- modify scope;
-- increase budget;
-- provide a decision;
-- restart;
-- cancel.
+This file conforms to the `HUMAN_DECISION.schema.json` schema and constitutes part of the run's audit trail.
+
+The human actions are:
+- `APPROVE` (resumes at `APPROVED`)
+- `REJECT` (ends run as `FAILED`)
+- `MODIFY_SCOPE` (resumes at `PLANNING` or specified state)
+- `INCREASE_BUDGET` (resumes at `PLANNING` or specified state)
+- `RETRY` (resumes at `PLANNING` or specified state)
+- `CANCEL` (ends run as `CANCELLED`)
+
+### Resumption Validation Semantics
+If the human decision specifies an explicit destination using `resume_state`, the Supervisor must validate it. Safe MVP resume destinations are limited to:
+- `PLANNING`
+- `WORKER_RUNNING`
+- `VALIDATING`
+- `REVIEWING`
+- `APPROVED`
+
+Direct resumption to `PUBLISHING`, `PUBLISHED`, or any other terminal/forbidden state is strictly prohibited.
 
 All such interventions should eventually be auditable.
 

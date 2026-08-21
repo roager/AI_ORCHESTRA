@@ -188,17 +188,11 @@ Every combination not listed in 3.1 is rejected, including but not limited to:
 ```text
 ACCEPT + CORRECT
 ACCEPT + HUMAN_REQUIRED
-ACCEPT + NONE
 CORRECT + PUBLISH
-CORRECT + NONE
 CORRECT + HUMAN_REQUIRED
 HUMAN_REQUIRED + PUBLISH
 HUMAN_REQUIRED + CORRECT
-HUMAN_REQUIRED + NONE
 ```
-
-`next_action: NONE` is permitted by the schema but is not currently valid with any decision. It is
-reserved and is rejected wherever it appears. See ARCHITECTURAL NOTES.
 
 ### 3.3 Additional rejection conditions
 
@@ -239,12 +233,12 @@ does not duplicate budget numbers; it defines how they are applied.
 
 Rules:
 
-1. `correction_round` in `STATUS.json` counts correction cycles already consumed. It starts at `0`
+1. `correction_rounds` in `STATUS.json` counts correction cycles already consumed. It starts at `0`
    and is incremented by the Supervisor **on entry to `CORRECTION_REQUIRED`**.
 2. On `CORRECT + CORRECT`:
-   - if `correction_round < max_correction_rounds` → `REVIEWING -> CORRECTION_REQUIRED`, increment
-     `correction_round`, then `CORRECTION_REQUIRED -> WORKER_RUNNING`;
-   - if `correction_round >= max_correction_rounds` → `REVIEWING -> HUMAN_REQUIRED` with reason
+   - if `correction_rounds < max_correction_rounds` → `REVIEWING -> CORRECTION_REQUIRED`, increment
+     `correction_rounds`, then `CORRECTION_REQUIRED -> WORKER_RUNNING`;
+   - if `correction_rounds >= max_correction_rounds` → `REVIEWING -> HUMAN_REQUIRED` with reason
      `correction_limit_reached`. The correction is **not** performed.
 3. The counter is never reset within a run, by any agent or by any human action short of starting a
    new run.
@@ -275,9 +269,9 @@ Checked deterministically by the Supervisor **before** each agent invocation, us
 | --- | --- | --- |
 | Worker invocation | `worker_calls < max_worker_calls` | `HUMAN_REQUIRED` / `budget_exhausted` |
 | Reviewer invocation | `reviewer_calls < max_reviewer_calls` | `HUMAN_REQUIRED` / `budget_exhausted` |
-| Correction | `correction_round < max_correction_rounds` | `HUMAN_REQUIRED` / `correction_limit_reached` |
+| Correction | `correction_rounds < max_correction_rounds` | `HUMAN_REQUIRED` / `correction_limit_reached` |
 | Tokens | observed tokens `< max_total_tokens` | `HUMAN_REQUIRED` / `budget_exhausted` |
-| Runtime | elapsed minutes `< max_runtime_minutes` | `HUMAN_REQUIRED` / `budget_exhausted` |
+| Runtime | elapsed seconds `< max_runtime_seconds` | `HUMAN_REQUIRED` / `budget_exhausted` |
 
 Crossing `warning_tokens` is recorded but does not halt the run.
 
@@ -305,9 +299,16 @@ Execution leaves `HUMAN_REQUIRED` only through a recorded human action. The mapp
 | `RETRY` | `HUMAN_REQUIRED -> PLANNING` | Re-plans from the current repository state. |
 | `CANCEL` | `HUMAN_REQUIRED -> CANCELLED` | Terminal. |
 
-Re-entry is at `PLANNING` rather than at the state where the run halted, because `STATUS.json` has
-no field recording a resume point. See ARCHITECTURAL NOTES. Counters are **not** reset by any of
-these actions.
+By default, resumption actions (like `RETRY`, `MODIFY_SCOPE`, `INCREASE_BUDGET`) re-enter at `PLANNING`. However, a human decision may specify a `resume_state` in the `HUMAN_DECISION.json` file. 
+
+The Supervisor must validate the requested `resume_state`. Safe MVP resume destinations are limited to:
+- `PLANNING`
+- `WORKER_RUNNING`
+- `VALIDATING`
+- `REVIEWING`
+- `APPROVED`
+
+Direct resumption to `PUBLISHING` or `PUBLISHED` is strictly forbidden. Other terminal states must not be used as resume targets. Counters are **not** reset by any human action.
 
 Triggers and definitions for each action are in `ESCALATION_POLICY.md`.
 
@@ -355,13 +356,9 @@ EVERY_RUN_HAS_AN_AUDIT_TRAIL
 
 Open items recorded rather than silently decided:
 
-1. `next_action: NONE` exists in `schemas\REVIEW.schema.json` but has no valid decision pairing.
-   Either a use for it must be defined or it should be removed from the schema.
-2. `STATUS.json` has no resume-point field, so all human resumptions re-enter at `PLANNING`. A
-   `resume_state` field would allow precise resumption but requires a schema change.
-3. "Protected branch" is not defined for this repository. Section 15 of the guidelines names `main`
-   and `master`; the authoritative list belongs in `GIT_POLICY.md`.
-4. Section 3.4 infers that `max_reviewer_calls = 3` accommodates two scheduled reviews plus one
+1. `resume_state` in `HUMAN_DECISION.json` allows precise resumption, which is validated by the Supervisor.
+2. "Protected branch" is not defined for this repository. Section 15 of the guidelines names `main`
+   and `master`; the authoritative list belongs in `GIT_POLICY.md` (and is defined in `PROJECT_STATE.json`).
+3. Section 3.4 infers that `max_reviewer_calls = 3` accommodates two scheduled reviews plus one
    retry. This is an interpretation of a provisional number, not a stated rule.
-5. Token accounting has no defined artifact. Section 5 of the guidelines mentions `USAGE.json`, but
-   no schema exists for it, and `STATUS.json` carries only an optional `total_tokens` field.
+4. Token accounting is defined via `USAGE.schema.json`.

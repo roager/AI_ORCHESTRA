@@ -23,11 +23,10 @@
       total_tokens        | tokens_total
       worker_calls
       reviewer_calls
-      correction_rounds   | correction_round      (STATUS.json spelling)
-      runtime_seconds     | runtime_minutes | elapsed_minutes
+      correction_rounds
+      runtime_seconds
 
-    runtime_seconds is the field defined by USAGE.schema.json and is converted
-    to minutes before comparison with max_runtime_minutes.
+    runtime_seconds is compared directly against max_runtime_seconds.
 
     Unrecognised fields are ignored. A missing counter is treated as 0 and
     reported as 'assumed_zero' so the gap is visible rather than silent. This
@@ -37,7 +36,7 @@
 .PARAMETER PolicyPath
     Path to BUDGET_POLICY.json. Required keys:
       max_total_tokens, warning_tokens, max_worker_calls,
-      max_reviewer_calls, max_correction_rounds, max_runtime_minutes
+      max_reviewer_calls, max_correction_rounds, max_runtime_seconds
 
 .PARAMETER AsJson
     Emit the result as JSON instead of a PSCustomObject.
@@ -79,7 +78,7 @@ $script:RequiredPolicyKeys = @(
     'max_worker_calls'
     'max_reviewer_calls'
     'max_correction_rounds'
-    'max_runtime_minutes'
+    'max_runtime_seconds'
 )
 
 # Maps a policy limit to the USAGE.json field names that may carry it.
@@ -98,13 +97,10 @@ $script:UsageFieldMap = [ordered]@{
         @{ Name = 'reviewer_calls';    Scale = 1.0 }
     )
     'max_correction_rounds' = @(
-        @{ Name = 'correction_rounds'; Scale = 1.0 }   # USAGE.schema.json
-        @{ Name = 'correction_round';  Scale = 1.0 }   # STATUS.schema.json spelling
+        @{ Name = 'correction_rounds'; Scale = 1.0 }
     )
-    'max_runtime_minutes'   = @(
-        @{ Name = 'runtime_seconds';   Scale = (1.0 / 60.0) }   # USAGE.schema.json
-        @{ Name = 'runtime_minutes';   Scale = 1.0 }
-        @{ Name = 'elapsed_minutes';   Scale = 1.0 }
+    'max_runtime_seconds'   = @(
+        @{ Name = 'runtime_seconds';   Scale = 1.0 }
     )
 }
 

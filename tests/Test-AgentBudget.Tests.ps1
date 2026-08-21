@@ -24,13 +24,13 @@ $tmp = New-TempDirectory
 try {
     # MVP provisional limits, mirroring policies\BUDGET_POLICY.json.
     $policy = New-TestJsonFile -Directory $tmp -FileName 'BUDGET_POLICY.json' -Data @{
-        policy_version        = '0.1'
+        policy_version        = '0.2'
         max_total_tokens      = 40000
         warning_tokens        = 30000
         max_worker_calls      = 2
         max_reviewer_calls    = 3
         max_correction_rounds = 1
-        max_runtime_minutes   = 45
+        max_runtime_seconds   = 2700
     }
 
     function Invoke-BudgetCase {
@@ -46,7 +46,7 @@ try {
     # -----------------------------------------------------------------------
     $r = Invoke-BudgetCase -Usage @{
         total_tokens = 12000; worker_calls = 1; reviewer_calls = 1
-        correction_rounds = 0; runtime_minutes = 8
+        correction_rounds = 0; runtime_seconds = 480
     } -Name 'usage-low.json'
     Assert-Equal -Name 'budget below warning is CONTINUE' -Expected 'CONTINUE' -Actual $r.Verdict.result
     Assert-Equal -Name 'budget below warning exits 0'      -Expected 0          -Actual $r.ExitCode
@@ -54,7 +54,7 @@ try {
     # Zero usage at the start of a run.
     $r = Invoke-BudgetCase -Usage @{
         total_tokens = 0; worker_calls = 0; reviewer_calls = 0
-        correction_rounds = 0; runtime_minutes = 0
+        correction_rounds = 0; runtime_seconds = 0
     } -Name 'usage-zero.json'
     Assert-Equal -Name 'zero usage is CONTINUE' -Expected 'CONTINUE' -Actual $r.Verdict.result
 
@@ -67,7 +67,7 @@ try {
     # -----------------------------------------------------------------------
     $r = Invoke-BudgetCase -Usage @{
         total_tokens = 30000; worker_calls = 1; reviewer_calls = 1
-        correction_rounds = 0; runtime_minutes = 10
+        correction_rounds = 0; runtime_seconds = 600
     } -Name 'usage-warn-exact.json'
     Assert-Equal -Name 'tokens exactly at warning_tokens is WARNING' -Expected 'WARNING' -Actual $r.Verdict.result
     Assert-Equal -Name 'warning exits 1' -Expected 1 -Actual $r.ExitCode
@@ -85,8 +85,7 @@ try {
         @{ Name = 'max_worker_calls';      Usage = @{ worker_calls = 2 } },
         @{ Name = 'max_reviewer_calls';    Usage = @{ reviewer_calls = 3 } },
         @{ Name = 'max_correction_rounds'; Usage = @{ correction_rounds = 1 } },
-        @{ Name = 'max_runtime_minutes';   Usage = @{ runtime_minutes = 45 } },
-        @{ Name = 'max_runtime_minutes via runtime_seconds'; Usage = @{ runtime_seconds = 2700 } }
+        @{ Name = 'max_runtime_seconds';   Usage = @{ runtime_seconds = 2700 } }
     )
     $i = 0
     foreach ($c in $stopCases) {
@@ -101,7 +100,7 @@ try {
     # One below each hard limit must NOT stop.
     $r = Invoke-BudgetCase -Usage @{
         total_tokens = 100; worker_calls = 1; reviewer_calls = 2
-        correction_rounds = 0; runtime_minutes = 44
+        correction_rounds = 0; runtime_seconds = 2699
     } -Name 'usage-just-under.json'
     Assert-Equal -Name 'one unit below every hard limit is CONTINUE' -Expected 'CONTINUE' -Actual $r.Verdict.result
 
@@ -112,9 +111,6 @@ try {
     # -----------------------------------------------------------------------
     # Field aliases and missing counters
     # -----------------------------------------------------------------------
-    $r = Invoke-BudgetCase -Usage @{ correction_round = 1 } -Name 'usage-alias.json'
-    Assert-Equal -Name 'correction_round alias (STATUS.json spelling) is honoured' -Expected 'STOP' -Actual $r.Verdict.result
-
     $r = Invoke-BudgetCase -Usage @{ tokens_total = 40000 } -Name 'usage-alias2.json'
     Assert-Equal -Name 'tokens_total alias is honoured' -Expected 'STOP' -Actual $r.Verdict.result
 
@@ -122,14 +118,14 @@ try {
     # runtime_seconds: the unit defined by schemas\USAGE.schema.json
     # -----------------------------------------------------------------------
     $r = Invoke-BudgetCase -Usage @{ runtime_seconds = 2699 } -Name 'usage-secs-under.json'
-    Assert-Equal -Name 'runtime_seconds 2699 (44.98 min) is CONTINUE' -Expected 'CONTINUE' -Actual $r.Verdict.result
+    Assert-Equal -Name 'runtime_seconds 2699 is CONTINUE' -Expected 'CONTINUE' -Actual $r.Verdict.result
 
     $r = Invoke-BudgetCase -Usage @{ runtime_seconds = 2700 } -Name 'usage-secs-exact.json'
-    Assert-Equal -Name 'runtime_seconds 2700 (45 min) is STOP' -Expected 'STOP' -Actual $r.Verdict.result
+    Assert-Equal -Name 'runtime_seconds 2700 is STOP' -Expected 'STOP' -Actual $r.Verdict.result
 
     $r = Invoke-BudgetCase -Usage @{ runtime_seconds = 600 } -Name 'usage-secs-low.json'
-    $runtimeCheck = @($r.Verdict.checks | Where-Object { $_.limit -eq 'max_runtime_minutes' })[0]
-    Assert-Equal -Name 'runtime_seconds converted to minutes' -Expected 10 -Actual $runtimeCheck.observed
+    $runtimeCheck = @($r.Verdict.checks | Where-Object { $_.limit -eq 'max_runtime_seconds' })[0]
+    Assert-Equal -Name 'runtime_seconds is read directly' -Expected 600 -Actual $runtimeCheck.observed
     Assert-Equal -Name 'source_field names the field actually read' -Expected 'runtime_seconds' -Actual $runtimeCheck.source_field
 
     # A document with the exact required shape of USAGE.schema.json.
@@ -181,7 +177,7 @@ try {
 
     $incoherent = New-TestJsonFile -Directory $tmp -FileName 'policy-incoherent.json' -Data @{
         max_total_tokens = 1000; warning_tokens = 5000; max_worker_calls = 2
-        max_reviewer_calls = 3; max_correction_rounds = 1; max_runtime_minutes = 45
+        max_reviewer_calls = 3; max_correction_rounds = 1; max_runtime_seconds = 2700
     }
     $v = Test-AgentBudgetUsage -UsagePath $u -PolicyPath $incoherent
     Assert-Equal -Name 'warning_tokens above max_total_tokens is INPUT_ERROR' -Expected 'INPUT_ERROR' -Actual $v.result
@@ -201,7 +197,7 @@ try {
     if (Test-Path -LiteralPath $realPolicy) {
         $u2 = New-TestJsonFile -Directory $tmp -FileName 'usage-real.json' -Data @{
             total_tokens = 100; worker_calls = 0; reviewer_calls = 0
-            correction_rounds = 0; runtime_minutes = 1
+            correction_rounds = 0; runtime_seconds = 60
         }
         $v = Test-AgentBudgetUsage -UsagePath $u2 -PolicyPath $realPolicy
         Assert-Equal -Name 'real BUDGET_POLICY.json is accepted by the validator' -Expected 'CONTINUE' -Actual $v.result
