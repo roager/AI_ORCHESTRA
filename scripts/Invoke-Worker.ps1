@@ -407,6 +407,7 @@ Your instructions:
 5. NEVER push, merge, force push, modify credentials, or elevate privileges.
 6. Execute relevant tests when appropriate.
 7. Produce your final structured report in JSON format at: $runDirCanonical\WORKER_REPORT.json
+   Note that WORKER_REPORT.json is a normal filesystem file. You must write it directly to the exact run-directory path using standard file-system writes. Do NOT create it as an Antigravity artifact, and do NOT use artifact-only tooling for this report. The run directory is explicitly authorized for this report.
    The report must strictly conform to schemas\WORKER_REPORT.schema.json, including:
    - "status": "completed" | "blocked" | "failed"
    - "files_changed": array of repository-relative paths modified
@@ -418,7 +419,13 @@ Your instructions:
 # --- 8. Execute Worker Process ----------------------------------------------
 $psi = [System.Diagnostics.ProcessStartInfo]::new()
 $psi.FileName = $executable
-$psi.ArgumentList.Add($Prompt)
+if ($workerClean -eq 'gemini') {
+    $null = $psi.ArgumentList.Add("--output-format")
+    $null = $psi.ArgumentList.Add("json")
+    $null = $psi.ArgumentList.Add("--print=$Prompt")
+} else {
+    $null = $psi.ArgumentList.Add($Prompt)
+}
 $psi.WorkingDirectory = $workspaceCanonical
 $psi.UseShellExecute = $false
 $psi.RedirectStandardOutput = $true
@@ -463,67 +470,220 @@ if (-not $exited) {
     
     $stdoutText = $stdoutTask.Result
     $stderrText = $stderrTask.Result
+    $exitCode = -1
     
     # Save partial output logs
     Set-Content -LiteralPath $stdoutLog -Value $stdoutText -Encoding UTF8
     Set-Content -LiteralPath $stderrLog -Value $stderrText -Encoding UTF8
+}
+else {
+    # Clean termination: retrieve stdout, stderr, exit code
+    $stdoutText = $stdoutTask.Result
+    $stderrText = $stderrTask.Result
+    $exitCode = $proc.ExitCode
     
-    Write-OutputObject -Data @{
-        result           = "TIMEOUT"
-        worker           = $Worker
-        task_id          = $task.task_id
-        workspace        = $workspaceCanonical
-        run_directory    = $runDirCanonical
-        duration_seconds = $duration
-        exit_code        = -1
-    }
-    exit 4
+    # Save output logs
+    Set-Content -LiteralPath $stdoutLog -Value $stdoutText -Encoding UTF8
+    Set-Content -LiteralPath $stderrLog -Value $stderrText -Encoding UTF8
 }
 
-# Clean termination: retrieve stdout, stderr, exit code
-$stdoutText = $stdoutTask.Result
-$stderrText = $stderrTask.Result
-$exitCode = $proc.ExitCode
+# --- Parse Gemini Structured Stdout ---
+$geminiStdoutData = $null
+$geminiStdoutParseError = $null
+$conversationId = $null
+$numTurns = $null
+$inputTokens = $null
+$cacheReadTokens = $null
+$outputTokens = $null
+$thinkingTokens = $null
+$totalTokens = 0
+$hasTokens = $false
+$geminiCliStatus = $null
+$geminiCliErrorMsg = $null
 
-# Save output logs
-Set-Content -LiteralPath $stdoutLog -Value $stdoutText -Encoding UTF8
-Set-Content -LiteralPath $stderrLog -Value $stderrText -Encoding UTF8
+if ($workerClean -eq 'gemini' -and -not [string]::IsNullOrWhiteSpace($stdoutText)) {
+    try {
+        $geminiStdoutData = $stdoutText | ConvertFrom-Json -ErrorAction Stop
+        if ($null -ne $geminiStdoutData) {
+            if ($geminiStdoutData.PSObject.Properties.Name -contains 'conversation_id') {
+                $conversationId = $geminiStdoutData.conversation_id
+            }
+            if ($geminiStdoutData.PSObject.Properties.Name -contains 'num_turns') {
+                $numTurns = $geminiStdoutData.num_turns
+            }
+            if ($geminiStdoutData.PSObject.Properties.Name -contains 'status') {
+                $geminiCliStatus = $geminiStdoutData.status
+            }
+            if ($geminiStdoutData.PSObject.Properties.Name -contains 'error') {
+                $geminiCliErrorMsg = $geminiStdoutData.error
+            }
+            if ($geminiStdoutData.PSObject.Properties.Name -contains 'usage' -and $null -ne $geminiStdoutData.usage) {
+                $u = $geminiStdoutData.usage
+                if ($u.PSObject.Properties.Name -contains 'input_tokens') {
+                    $inputTokens = $u.input_tokens
+                }
+                if ($u.PSObject.Properties.Name -contains 'cache_read_tokens') {
+                    $cacheReadTokens = $u.cache_read_tokens
+                }
+                if ($u.PSObject.Properties.Name -contains 'output_tokens') {
+                    $outputTokens = $u.output_tokens
+                }
+                if ($u.PSObject.Properties.Name -contains 'thinking_tokens') {
+                    $thinkingTokens = $u.thinking_tokens
+                }
+                if ($u.PSObject.Properties.Name -contains 'total_tokens') {
+                    $totalTokens = [int]$u.total_tokens
+                    $hasTokens = $true
+                }
+            }
+        }
+    }
+    catch {
+        $geminiStdoutParseError = $_.Exception.Message
+    }
+}
 
-# --- 9. Validate WORKER_REPORT.json -----------------------------------------
-if (-not (Test-Path -LiteralPath $reportFile)) {
-    Write-OutputObject -Data @{
-        result           = "INVALID_OUTPUT"
+# --- Usage Accounting ---
+$usagePath = Join-Path $runDirCanonical "USAGE.json"
+if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
+    try {
+        $usageRaw = Get-Content -LiteralPath $usagePath -Raw -Encoding UTF8
+        $usageData = $usageRaw | ConvertFrom-Json -ErrorAction Stop
+        if ($null -ne $usageData) {
+            $usageData.worker_calls = [int]$usageData.worker_calls + 1
+            $usageData.runtime_seconds = [int]$usageData.runtime_seconds + [Math]::Round($duration)
+            if ($hasTokens) {
+                $usageData.total_tokens = [int]$usageData.total_tokens + $totalTokens
+            }
+            $usageData | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $usagePath -Encoding UTF8
+        }
+    }
+    catch {
+        # proceed silently if USAGE.json is unparseable
+    }
+}
+
+# --- Budget Check ---
+$budgetVerdict = $null
+$budgetExceeded = $false
+$budgetReason = ""
+$budgetEscalationReason = ""
+
+if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
+    try {
+        $budgetScript = Join-Path $scriptDir "Test-AgentBudget.ps1"
+        $budgetOutputText = pwsh -NoProfile -NonInteractive -File $budgetScript -UsagePath $usagePath -PolicyPath $budgetPolicyPath -AsJson
+        $budgetExitCode = $LASTEXITCODE
+        if ($budgetExitCode -eq 2) {
+            $budgetExceeded = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($budgetOutputText)) {
+            $budgetVerdict = $budgetOutputText | ConvertFrom-Json -ErrorAction Stop
+            if ($null -ne $budgetVerdict) {
+                if ($budgetVerdict.PSObject.Properties.Name -contains 'reason') {
+                    $budgetReason = $budgetVerdict.reason
+                }
+                if ($budgetVerdict.PSObject.Properties.Name -contains 'escalation_reason') {
+                    $budgetEscalationReason = $budgetVerdict.escalation_reason
+                }
+            }
+        }
+    }
+    catch {
+        # proceed silently if budget check fails
+    }
+}
+
+# --- Structured Exit Helper ---
+function Write-ResultAndExit {
+    param(
+        [Parameter(Mandatory=$true)] [string] $Verdict,
+        [Parameter(Mandatory=$false)] [int] $CustomExitCode = 2,
+        [Parameter(Mandatory=$false)] [object] $Report = $null,
+        [Parameter(Mandatory=$false)] [string] $CustomReason = $null,
+        [Parameter(Mandatory=$false)] [string] $EscalationReason = $null
+    )
+    
+    $resultData = [ordered]@{
+        result           = $Verdict
         worker           = $Worker
         task_id          = $task.task_id
         workspace        = $workspaceCanonical
         run_directory    = $runDirCanonical
         duration_seconds = $duration
         exit_code        = $exitCode
-        reason           = "WORKER_REPORT.json is missing."
     }
-    exit 2
+    
+    if ($null -ne $Report) {
+        $resultData["worker_report"] = $Report
+    }
+    
+    if (-not [string]::IsNullOrWhiteSpace($CustomReason)) {
+        $resultData["reason"] = $CustomReason
+    }
+    
+    if (-not [string]::IsNullOrWhiteSpace($EscalationReason)) {
+        $resultData["escalation_reason"] = $EscalationReason
+    }
+    
+    if ($workerClean -eq 'gemini') {
+        if ($null -ne $conversationId)   { $resultData["conversation_id"]   = $conversationId }
+        if ($null -ne $numTurns)         { $resultData["num_turns"]         = $numTurns }
+        if ($null -ne $inputTokens)      { $resultData["input_tokens"]      = $inputTokens }
+        if ($null -ne $cacheReadTokens)  { $resultData["cache_read_tokens"]  = $cacheReadTokens }
+        if ($null -ne $outputTokens)     { $resultData["output_tokens"]     = $outputTokens }
+        if ($null -ne $thinkingTokens)   { $resultData["thinking_tokens"]   = $thinkingTokens }
+        if ($null -ne $totalTokens)      { $resultData["total_tokens"]      = $totalTokens }
+    }
+    
+    $obj = [pscustomobject]$resultData
+    if ($AsJson) {
+        $obj | ConvertTo-Json -Compress -Depth 6
+    }
+    else {
+        $obj
+    }
+    exit $CustomExitCode
 }
 
+# --- Process Verdict ---
+
+# 1. Budget hard-stop check
+if ($budgetExceeded) {
+    Write-ResultAndExit -Verdict "STOP" -CustomExitCode 2 -CustomReason "Hard limit reached: $budgetReason" -EscalationReason $budgetEscalationReason
+}
+
+# 2. Timeout check
+if (-not $exited) {
+    Write-ResultAndExit -Verdict "TIMEOUT" -CustomExitCode 4
+}
+
+# 3. Gemini stdout valid JSON check
+if ($workerClean -eq 'gemini' -and $null -eq $geminiStdoutData) {
+    Write-ResultAndExit -Verdict "INVALID_OUTPUT" -CustomExitCode 2 -CustomReason "Gemini stdout is not valid JSON. Parse error: $geminiStdoutParseError"
+}
+
+# 4. Gemini CLI error check
+if ($workerClean -eq 'gemini' -and $geminiCliStatus -eq 'ERROR') {
+    Write-ResultAndExit -Verdict "FAILED" -CustomExitCode 2 -CustomReason "Gemini CLI reported error: $geminiCliErrorMsg"
+}
+
+# 5. WORKER_REPORT.json existence check
+if (-not (Test-Path -LiteralPath $reportFile)) {
+    Write-ResultAndExit -Verdict "INVALID_OUTPUT" -CustomExitCode 2 -CustomReason "WORKER_REPORT.json is missing."
+}
+
+# 6. Parse WORKER_REPORT.json
 $reportData = $null
 try {
     $reportRaw = Get-Content -LiteralPath $reportFile -Raw -Encoding UTF8
     $reportData = $reportRaw | ConvertFrom-Json -ErrorAction Stop
 }
 catch {
-    Write-OutputObject -Data @{
-        result           = "INVALID_OUTPUT"
-        worker           = $Worker
-        task_id          = $task.task_id
-        workspace        = $workspaceCanonical
-        run_directory    = $runDirCanonical
-        duration_seconds = $duration
-        exit_code        = $exitCode
-        reason           = "WORKER_REPORT.json is not valid JSON."
-    }
-    exit 2
+    Write-ResultAndExit -Verdict "INVALID_OUTPUT" -CustomExitCode 2 -CustomReason "WORKER_REPORT.json is not valid JSON."
 }
 
-# Structural Schema validation
+# 7. Structural Schema validation
 $isValid = $true
 $validationError = ""
 
@@ -553,73 +713,22 @@ if ($isValid) {
 }
 
 if (-not $isValid) {
-    Write-OutputObject -Data @{
-        result           = "INVALID_OUTPUT"
-        worker           = $Worker
-        task_id          = $task.task_id
-        workspace        = $workspaceCanonical
-        run_directory    = $runDirCanonical
-        duration_seconds = $duration
-        exit_code        = $exitCode
-        reason           = "WORKER_REPORT.json structural validation failed: $validationError"
-    }
-    exit 2
+    Write-ResultAndExit -Verdict "INVALID_OUTPUT" -CustomExitCode 2 -CustomReason "WORKER_REPORT.json structural validation failed: $validationError"
 }
 
-# --- 10. Process Deterministic Verdict & Exit Codes ------------------------
+# 8. Clean process non-zero exit code with status completed check
 if ($exitCode -ne 0 -and $reportData.status -eq 'completed') {
-    # If the process exited non-zero but claimed completed, treat it as FAILED
-    Write-OutputObject -Data @{
-        result           = "FAILED"
-        worker           = $Worker
-        task_id          = $task.task_id
-        workspace        = $workspaceCanonical
-        run_directory    = $runDirCanonical
-        duration_seconds = $duration
-        exit_code        = $exitCode
-        worker_report    = $reportData
-        reason           = "Worker process exited with non-zero code $exitCode."
-    }
-    exit 2
+    Write-ResultAndExit -Verdict "FAILED" -CustomExitCode 2 -Report $reportData -CustomReason "Worker process exited with non-zero code $exitCode."
 }
 
+# 9. Return worker report status outcome
 if ($reportData.status -eq 'completed') {
-    Write-OutputObject -Data @{
-        result           = "COMPLETED"
-        worker           = $Worker
-        task_id          = $task.task_id
-        workspace        = $workspaceCanonical
-        run_directory    = $runDirCanonical
-        duration_seconds = $duration
-        exit_code        = $exitCode
-        worker_report    = $reportData
-    }
-    exit 0
+    Write-ResultAndExit -Verdict "COMPLETED" -CustomExitCode 0 -Report $reportData
 }
 elseif ($reportData.status -eq 'blocked') {
-    Write-OutputObject -Data @{
-        result           = "BLOCKED"
-        worker           = $Worker
-        task_id          = $task.task_id
-        workspace        = $workspaceCanonical
-        run_directory    = $runDirCanonical
-        duration_seconds = $duration
-        exit_code        = $exitCode
-        worker_report    = $reportData
-    }
-    exit 1
+    Write-ResultAndExit -Verdict "BLOCKED" -CustomExitCode 1 -Report $reportData
 }
 else {
-    # Status is failed
-    Write-OutputObject -Data @{
-        result           = "FAILED"
-        worker           = $Worker
-        task_id          = $task.task_id
-        workspace        = $workspaceCanonical
-        run_directory    = $runDirCanonical
-        duration_seconds = $duration
-        exit_code        = $exitCode
-        worker_report    = $reportData
-    }
-    exit 2
+    Write-ResultAndExit -Verdict "FAILED" -CustomExitCode 2 -Report $reportData
 }
+

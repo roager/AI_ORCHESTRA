@@ -50,13 +50,28 @@ public class FakeWorker {
             File.WriteAllText(writeCwdPath, Directory.GetCurrentDirectory());
         }
 
+        string writeArgsPath = Environment.GetEnvironmentVariable("FAKE_WORKER_WRITE_ARGS");
+        if (!string.IsNullOrEmpty(writeArgsPath)) {
+            using (StreamWriter sw = new StreamWriter(writeArgsPath)) {
+                sw.WriteLine(args.Length);
+                foreach (string arg in args) {
+                    sw.WriteLine(arg.Replace("\r", "").Replace("\n", "\\n"));
+                }
+            }
+        }
+
         string reportDest = Environment.GetEnvironmentVariable("FAKE_WORKER_REPORT_DEST");
         string reportContent = Environment.GetEnvironmentVariable("FAKE_WORKER_REPORT_CONTENT");
         if (!string.IsNullOrEmpty(reportDest) && !string.IsNullOrEmpty(reportContent)) {
             File.WriteAllText(reportDest, reportContent);
         }
 
-        Console.WriteLine("FAKE WORKER STDOUT");
+        string stdoutEnv = Environment.GetEnvironmentVariable("FAKE_WORKER_STDOUT");
+        if (!string.IsNullOrEmpty(stdoutEnv)) {
+            Console.WriteLine(stdoutEnv);
+        } else {
+            Console.WriteLine("FAKE WORKER STDOUT");
+        }
         Console.Error.WriteLine("FAKE WORKER STDERR");
 
         return exitCode;
@@ -525,19 +540,19 @@ try {
     $hashAfter = (Get-FileHash -LiteralPath $statusPath -Algorithm SHA256).Hash
     Assert-Equal -Name 'STATUS.json not altered' -Expected $hashBefore -Actual $hashAfter
 
-    # 35. Invoke-Worker does not alter USAGE.json
+    # 35. Invoke-Worker updates USAGE.json for Claude
     $f = New-InvokeWorkerFixture
     $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
     $usagePath = Join-Path $f.RunDir "USAGE.json"
-    $hashBefore = (Get-FileHash -LiteralPath $usagePath -Algorithm SHA256).Hash
     
     $reportFile = Join-Path $f.RunDir "WORKER_REPORT.json"
     $env:FAKE_WORKER_REPORT_DEST = $reportFile
     $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
     
     $resRaw = & $invokeScript -Worker "claude" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $f.RunDir -AsJson -OverrideExecutablePath $fakeWorkerExe
-    $hashAfter = (Get-FileHash -LiteralPath $usagePath -Algorithm SHA256).Hash
-    Assert-Equal -Name 'USAGE.json not altered' -Expected $hashBefore -Actual $hashAfter
+    
+    $updatedUsage = Get-Content -LiteralPath $usagePath -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'Claude worker_calls incremented' -Expected 1 -Actual $updatedUsage.worker_calls
 
     # 36. Invoke-Worker does not alter TASK.json
     $f = New-InvokeWorkerFixture
@@ -553,12 +568,189 @@ try {
     $hashAfter = (Get-FileHash -LiteralPath $runTaskPath -Algorithm SHA256).Hash
     Assert-Equal -Name 'TASK.json not altered' -Expected $hashBefore -Actual $hashAfter
 
+    # 37. Gemini worker adapter parses args correctly (uses --print, --output-format json, and prompt)
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    $argsFile = Join-Path $runDir "args.txt"
+    
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_WRITE_ARGS = $argsFile
+    $env:FAKE_WORKER_STDOUT = '{"conversation_id":"conv-123","status":"SUCCESS","num_turns":1,"usage":{"input_tokens":1000,"output_tokens":200,"thinking_tokens":50,"cache_read_tokens":500,"total_tokens":1200}}'
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "gemini" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    $res = $resRaw | ConvertFrom-Json
+
+    Assert-Equal -Name 'gemini success - result is COMPLETED' -Expected 'COMPLETED' -Actual $res.result
+    Assert-Equal -Name 'gemini success - worker is gemini' -Expected 'gemini' -Actual $res.worker
+    Assert-Equal -Name 'gemini success - total_tokens matches' -Expected 1200 -Actual $res.total_tokens
+    Assert-Equal -Name 'gemini success - input_tokens matches' -Expected 1000 -Actual $res.input_tokens
+    Assert-Equal -Name 'gemini success - output_tokens matches' -Expected 200 -Actual $res.output_tokens
+    Assert-Equal -Name 'gemini success - cache_read_tokens matches' -Expected 500 -Actual $res.cache_read_tokens
+    Assert-Equal -Name 'gemini success - thinking_tokens matches' -Expected 50 -Actual $res.thinking_tokens
+    Assert-Equal -Name 'gemini success - conversation_id matches' -Expected 'conv-123' -Actual $res.conversation_id
+
+    Assert-True -Name 'gemini args file exists' -Condition (Test-Path -LiteralPath $argsFile)
+    $passedArgs = Get-Content -LiteralPath $argsFile
+    
+    Assert-Equal -Name 'gemini args count is 3' -Expected 3 -Actual ([int]$passedArgs[0])
+    Assert-Equal -Name 'gemini has --output-format' -Expected '--output-format' -Actual ($passedArgs[1])
+    Assert-Equal -Name 'gemini output-format value is json' -Expected 'json' -Actual ($passedArgs[2])
+    
+    $argsList = $passedArgs[1..3]
+    $printArgs = @($argsList | Where-Object { $_.StartsWith("--print=") })
+    Assert-Equal -Name 'exactly one arg starts with --print=' -Expected 1 -Actual $printArgs.Count
+    Assert-True -Name 'print arg contains the prompt' -Condition ($printArgs[0] -match "You are a worker agent executing a bounded task under the AI_ORCHESTRA system")
+
+    # Verify prompt is not passed as a separate positional argument
+    $nonPrintArgs = $argsList | Where-Object { -not $_.StartsWith("--print=") }
+    foreach ($arg in $nonPrintArgs) {
+        Assert-True -Name 'non-print arg does not contain prompt' -Condition ($arg -notmatch "You are a worker agent executing a bounded task under the AI_ORCHESTRA system")
+    }
+
+    # Verify dangerously-skip-permissions is absent
+    $hasSkipPerms = $argsList | Where-Object { $_ -eq "--dangerously-skip-permissions" }
+    Assert-True -Name 'dangerously-skip-permissions is absent' -Condition ($null -eq $hasSkipPerms)
+
+    # Verify prompt instructs worker to write a normal file rather than an artifact
+    Assert-True -Name 'prompt instructs worker to write normal file' -Condition (($passedArgs[3]) -match "WORKER_REPORT.json is a normal filesystem file")
+
+    # 38. Gemini stdout status ERROR + exit_code 0 + completed WORKER_REPORT -> FAILED with agy.error reason
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_STDOUT = '{"conversation_id":"conv-456","status":"ERROR","error":"declaring permissions failed","num_turns":1,"usage":{"total_tokens":200}}'
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "gemini" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    $res = $resRaw | ConvertFrom-Json
+
+    Assert-Equal -Name 'gemini CLI error is FAILED (not COMPLETED)' -Expected 'FAILED' -Actual $res.result
+    Assert-True -Name 'gemini CLI error contains error reason' -Condition ($res.reason -match "declaring permissions failed")
+
+    # 39. Gemini malformed stdout JSON -> INVALID_OUTPUT
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_STDOUT = '{"conversation_id": "malformed'
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "gemini" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    $res = $resRaw | ConvertFrom-Json
+
+    Assert-Equal -Name 'gemini malformed stdout is INVALID_OUTPUT' -Expected 'INVALID_OUTPUT' -Actual $res.result
+
+    # 40. Usage accounting: worker_calls increments, runtime_seconds adds, total_tokens accumulates, reviewer_calls/correction_rounds preserved
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    $usageFile = Join-Path $runDir "USAGE.json"
+
+    # Set existing USAGE.json values to non-zero to test accumulation
+    $existingUsage = @{
+        task_id = "task-101"
+        worker_calls = 0
+        reviewer_calls = 2
+        correction_rounds = 1
+        runtime_seconds = 100
+        total_tokens = 5000
+    }
+    $existingUsage | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $usageFile -Encoding UTF8
+    
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "1000"
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_STDOUT = '{"conversation_id":"conv-abc","status":"SUCCESS","num_turns":1,"usage":{"total_tokens":1500}}'
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "gemini" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    
+    # Read updated USAGE.json
+    $updatedUsage = Get-Content -LiteralPath $usageFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'usage worker_calls increments exactly once' -Expected 1 -Actual $updatedUsage.worker_calls
+    Assert-Equal -Name 'usage reviewer_calls preserved' -Expected 2 -Actual $updatedUsage.reviewer_calls
+    Assert-Equal -Name 'usage correction_rounds preserved' -Expected 1 -Actual $updatedUsage.correction_rounds
+    Assert-True -Name 'usage runtime_seconds accumulated' -Condition ($updatedUsage.runtime_seconds -gt 100)
+    Assert-Equal -Name 'usage total_tokens accumulated rather than reset' -Expected 6500 -Actual $updatedUsage.total_tokens
+
+    # 41. Missing token usage does not invent tokens (total_tokens remains unchanged)
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    $usageFile = Join-Path $runDir "USAGE.json"
+
+    $existingUsage = @{
+        task_id = "task-101"
+        worker_calls = 0
+        reviewer_calls = 0
+        correction_rounds = 0
+        runtime_seconds = 0
+        total_tokens = 5000
+    }
+    $existingUsage | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $usageFile -Encoding UTF8
+    
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    # stdout lacks usage token info:
+    $env:FAKE_WORKER_STDOUT = '{"conversation_id":"conv-xyz","status":"SUCCESS","num_turns":1}'
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "gemini" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    
+    $updatedUsage = Get-Content -LiteralPath $usageFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'missing token usage does not invent tokens' -Expected 5000 -Actual $updatedUsage.total_tokens
+
+    # 42. Budget STOP/escalation semantics triggered at 172798 total tokens
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    $usageFile = Join-Path $runDir "USAGE.json"
+    
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_STDOUT = '{"conversation_id":"conv-huge","status":"SUCCESS","num_turns":1,"usage":{"total_tokens":172798}}'
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "gemini" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    $res = $resRaw | ConvertFrom-Json
+
+    Assert-Equal -Name 'huge tokens triggers budget STOP' -Expected 'STOP' -Actual $res.result
+    Assert-Equal -Name 'budget STOP returns budget_exhausted escalation_reason' -Expected 'budget_exhausted' -Actual $res.escalation_reason
+    Assert-True -Name 'huge tokens exits 2' -Condition ($LASTEXITCODE -eq 2)
+
 }
 finally {
     # Reset env variables
     $env:FAKE_WORKER_EXIT_CODE = "0"
     $env:FAKE_WORKER_SLEEP_MS = "0"
     $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_WRITE_ARGS = ""
+    $env:FAKE_WORKER_STDOUT = ""
     $env:FAKE_WORKER_REPORT_DEST = ""
     $env:FAKE_WORKER_REPORT_CONTENT = ""
 
