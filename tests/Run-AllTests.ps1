@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Runs every AI_ORCHESTRA validator test suite.
+    Runs every AI_ORCHESTRA validator test suite: budget, scope, state, worktree, run, and worker.
 
 .DESCRIPTION
     Dependency-free runner. Each *.Tests.ps1 file is executed in its own scope
@@ -32,7 +32,7 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host ''
-Write-Host 'AI_ORCHESTRA validator and worktree tests' -ForegroundColor White
+Write-Host 'AI_ORCHESTRA validator, worktree, and worker tests' -ForegroundColor White
 Write-Host ("PowerShell {0} on {1}" -f $PSVersionTable.PSVersion, [System.Environment]::OSVersion.Platform)
 
 $suites = @(Get-ChildItem -LiteralPath $here -Filter '*.Tests.ps1' -File |
