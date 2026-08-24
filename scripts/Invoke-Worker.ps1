@@ -416,15 +416,95 @@ Your instructions:
 9. Do not create unrelated artifacts outside the workspace or run directory.
 "@
 
-# --- 8. Execute Worker Process ----------------------------------------------
-$psi = [System.Diagnostics.ProcessStartInfo]::new()
-$psi.FileName = $executable
+# --- 8. Build Deterministic Launch Plan -------------------------------------
+# System.Diagnostics.ProcessStartInfo cannot execute a PowerShell script (.ps1)
+# directly as FileName. On Windows the npm-installed Claude CLI commonly resolves
+# to '<npm prefix>\claude.ps1', so a resolved .ps1 must be launched through pwsh.
+# A resolved real executable continues to be launched directly.
+
+function Resolve-PwshHostPath {
+    $candidate = ""
+    try {
+        $candidate = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty Source -ErrorAction SilentlyContinue
+    }
+    catch {
+        $candidate = ""
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        try {
+            $candidate = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        }
+        catch {
+            $candidate = ""
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return "" }
+    return $candidate
+}
+
+$executableExtension = ""
+try {
+    $executableExtension = [System.IO.Path]::GetExtension($executable)
+}
+catch {
+    $executableExtension = ""
+}
+$isPowerShellScript = (-not [string]::IsNullOrWhiteSpace($executableExtension)) -and
+    $executableExtension.Equals(".ps1", [System.StringComparison]::OrdinalIgnoreCase)
+
+$launchFileName = $executable
+$launchArguments = [System.Collections.Generic.List[string]]::new()
+
+if ($isPowerShellScript) {
+    $pwshHostPath = Resolve-PwshHostPath
+    if ([string]::IsNullOrWhiteSpace($pwshHostPath)) {
+        Write-OutputObject -Data @{
+            result = "WORKER_UNAVAILABLE"
+            worker = $workerClean
+            reason = "Resolved worker command '$executable' is a PowerShell script but the pwsh host could not be located."
+        }
+        exit 5
+    }
+    $launchFileName = $pwshHostPath
+    $null = $launchArguments.Add("-NoProfile")
+    $null = $launchArguments.Add("-File")
+    $null = $launchArguments.Add($executable)
+}
+
 if ($workerClean -eq 'gemini') {
-    $null = $psi.ArgumentList.Add("--output-format")
-    $null = $psi.ArgumentList.Add("json")
-    $null = $psi.ArgumentList.Add("--print=$Prompt")
+    $null = $launchArguments.Add("--output-format")
+    $null = $launchArguments.Add("json")
+    $null = $launchArguments.Add("--print=$Prompt")
 } else {
-    $null = $psi.ArgumentList.Add($Prompt)
+    # Claude's documented non-interactive contract.
+    $null = $launchArguments.Add("--print")
+    $null = $launchArguments.Add("--output-format")
+    $null = $launchArguments.Add("json")
+    $null = $launchArguments.Add($Prompt)
+}
+
+# Record the resolved launch plan for auditability before any process is started.
+$launchPlanPath = Join-Path $logDir "worker.launch.json"
+try {
+    [pscustomobject][ordered]@{
+        worker            = $workerClean
+        resolved_command  = $executable
+        is_powershell_script = $isPowerShellScript
+        file_name         = $launchFileName
+        arguments         = @($launchArguments)
+        working_directory = $workspaceCanonical
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $launchPlanPath -Encoding UTF8
+}
+catch {
+    # Auditing artifact only; never block the invocation on it.
+}
+
+# --- 9. Execute Worker Process ----------------------------------------------
+$psi = [System.Diagnostics.ProcessStartInfo]::new()
+$psi.FileName = $launchFileName
+foreach ($launchArg in $launchArguments) {
+    $null = $psi.ArgumentList.Add($launchArg)
 }
 $psi.WorkingDirectory = $workspaceCanonical
 $psi.UseShellExecute = $false

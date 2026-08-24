@@ -100,6 +100,62 @@ if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed: $($compileOut -join ' ')"
 }
 
+# --- Fake Claude PowerShell-script launcher ---------------------------------
+# Mirrors the npm-installed Claude CLI on Windows, which resolves to claude.ps1.
+# System.Diagnostics.ProcessStartInfo cannot execute this file directly.
+$fakeClaudePs1Source = @'
+$argsPath = $env:FAKE_WORKER_WRITE_ARGS
+if (-not [string]::IsNullOrEmpty($argsPath)) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add([string]$args.Count)
+    foreach ($a in $args) {
+        $lines.Add((([string]$a).Replace("`r", "").Replace("`n", "\n")))
+    }
+    Set-Content -LiteralPath $argsPath -Value $lines -Encoding UTF8
+}
+
+$cwdPath = $env:FAKE_WORKER_WRITE_CWD
+if (-not [string]::IsNullOrEmpty($cwdPath)) {
+    Set-Content -LiteralPath $cwdPath -Value ((Get-Location).Path) -Encoding UTF8
+}
+
+$hostPath = $env:FAKE_WORKER_WRITE_HOST
+if (-not [string]::IsNullOrEmpty($hostPath)) {
+    Set-Content -LiteralPath $hostPath -Value ([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -Encoding UTF8
+}
+
+$dest = $env:FAKE_WORKER_REPORT_DEST
+$reportContent = $env:FAKE_WORKER_REPORT_CONTENT
+if ((-not [string]::IsNullOrEmpty($dest)) -and (-not [string]::IsNullOrEmpty($reportContent))) {
+    Set-Content -LiteralPath $dest -Value $reportContent -Encoding UTF8 -NoNewline
+}
+
+Write-Output "FAKE PS1 WORKER STDOUT"
+[Console]::Error.WriteLine("FAKE PS1 WORKER STDERR")
+exit 0
+'@
+
+$fakeClaudePs1 = Join-Path $fakeWorkerTempDir "claude.ps1"
+Set-Content -LiteralPath $fakeClaudePs1 -Value $fakeClaudePs1Source -Encoding UTF8
+
+# A resolvable-but-not-executable file, used to force a pre-launch start failure.
+$notAnExecutable = Join-Path $fakeWorkerTempDir "not-an-executable.txt"
+Set-Content -LiteralPath $notAnExecutable -Value "this is not a program" -Encoding UTF8
+
+function Get-LaunchPlan {
+    param([string] $RunDirectory)
+    $planPath = Join-Path $RunDirectory "logs/worker.launch.json"
+    if (-not (Test-Path -LiteralPath $planPath)) { return $null }
+    return (Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json)
+}
+
+$forbiddenWorkerFlags = @(
+    '--dangerously-skip-permissions',
+    '--continue',
+    '--resume',
+    '--remote-control'
+)
+
 # --- Fixture Helper ---------------------------------------------------------
 function New-InvokeWorkerFixture {
     $tmpDir = New-TempDirectory
@@ -743,6 +799,205 @@ try {
     Assert-Equal -Name 'budget STOP returns budget_exhausted escalation_reason' -Expected 'budget_exhausted' -Actual $res.escalation_reason
     Assert-True -Name 'huge tokens exits 2' -Condition ($LASTEXITCODE -eq 2)
 
+    # =======================================================================
+    # CLAUDE LAUNCHER FORMS (43 - 46)   [AO-004C1]
+    # =======================================================================
+
+    # 43. FORM A: Claude resolved as a PowerShell script (.ps1)
+    #     -> launched through pwsh -NoProfile -File <claude.ps1> --print --output-format json <prompt>
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    $argsFile = Join-Path $runDir "args.txt"
+    $cwdFile = Join-Path $runDir "cwd.txt"
+    $hostFile = Join-Path $runDir "host.txt"
+
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_STDOUT = ""
+    $env:FAKE_WORKER_WRITE_ARGS = $argsFile
+    $env:FAKE_WORKER_WRITE_CWD = $cwdFile
+    $env:FAKE_WORKER_WRITE_HOST = $hostFile
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "claude" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeClaudePs1
+    $res = $resRaw | ConvertFrom-Json
+
+    if ($res.result -ne 'COMPLETED') {
+        Write-Host "Test 43 failed. Reason: $($res.reason)"
+    }
+    Assert-Equal -Name 'claude ps1 - result is COMPLETED' -Expected 'COMPLETED' -Actual $res.result
+    Assert-Equal -Name 'claude ps1 - exit_code is 0' -Expected 0 -Actual $res.exit_code
+
+    $plan = Get-LaunchPlan -RunDirectory $runDir
+    Assert-True -Name 'claude ps1 - launch plan recorded' -Condition ($null -ne $plan)
+    Assert-True -Name 'claude ps1 - detected as PowerShell script' -Condition ([bool]$plan.is_powershell_script)
+    Assert-Equal -Name 'claude ps1 - resolved command is claude.ps1' -Expected $fakeClaudePs1 -Actual $plan.resolved_command
+
+    # ProcessStartInfo.FileName must be the pwsh host, never the .ps1 itself
+    $planFileLeaf = [System.IO.Path]::GetFileNameWithoutExtension([string]$plan.file_name)
+    Assert-Equal -Name 'claude ps1 - ProcessStartInfo launches pwsh' -Expected 'pwsh' -Actual $planFileLeaf
+    Assert-True -Name 'claude ps1 - FileName is not the .ps1' -Condition (([string]$plan.file_name) -ne $fakeClaudePs1)
+
+    $planArgs = @($plan.arguments)
+    Assert-Equal -Name 'claude ps1 - argument count is 7' -Expected 7 -Actual $planArgs.Count
+    Assert-Equal -Name 'claude ps1 - arg 0 is -NoProfile' -Expected '-NoProfile' -Actual $planArgs[0]
+    Assert-Equal -Name 'claude ps1 - arg 1 is -File' -Expected '-File' -Actual $planArgs[1]
+    Assert-Equal -Name 'claude ps1 - arg 2 is the claude.ps1 path' -Expected $fakeClaudePs1 -Actual $planArgs[2]
+    Assert-Equal -Name 'claude ps1 - arg 3 is --print' -Expected '--print' -Actual $planArgs[3]
+    Assert-Equal -Name 'claude ps1 - arg 4 is --output-format' -Expected '--output-format' -Actual $planArgs[4]
+    Assert-Equal -Name 'claude ps1 - arg 5 is json' -Expected 'json' -Actual $planArgs[5]
+    Assert-True -Name 'claude ps1 - arg 6 is the bounded prompt' -Condition ($planArgs[6] -match "You are a worker agent executing a bounded task under the AI_ORCHESTRA system")
+
+    # Non-interactive contract: --print present, no dangerous or session-resuming flags
+    Assert-True -Name 'claude ps1 - prompt is not interactive (--print present)' -Condition ($planArgs -contains '--print')
+    foreach ($flag in $forbiddenWorkerFlags) {
+        Assert-True -Name "claude ps1 - forbidden flag '$flag' absent" -Condition (-not ($planArgs -contains $flag))
+    }
+
+    # The pwsh host really did run the script, and only the CLI args reached it
+    Assert-True -Name 'claude ps1 - script received args' -Condition (Test-Path -LiteralPath $argsFile)
+    $passedArgs = Get-Content -LiteralPath $argsFile
+    Assert-Equal -Name 'claude ps1 - script arg count is 4' -Expected 4 -Actual ([int]$passedArgs[0])
+    Assert-Equal -Name 'claude ps1 - script arg 1 is --print' -Expected '--print' -Actual $passedArgs[1]
+    Assert-Equal -Name 'claude ps1 - script arg 2 is --output-format' -Expected '--output-format' -Actual $passedArgs[2]
+    Assert-Equal -Name 'claude ps1 - script arg 3 is json' -Expected 'json' -Actual $passedArgs[3]
+    Assert-True -Name 'claude ps1 - script arg 4 is the prompt' -Condition ($passedArgs[4] -match "You are a worker agent executing a bounded task under the AI_ORCHESTRA system")
+
+    $actualHost = (Get-Content -LiteralPath $hostFile -Raw).Trim()
+    Assert-Equal -Name 'claude ps1 - hosting process is pwsh' -Expected 'pwsh' -Actual ([System.IO.Path]::GetFileNameWithoutExtension($actualHost))
+
+    # Assigned worktree preserved as WorkingDirectory
+    $writtenCwd = (Get-Content -LiteralPath $cwdFile -Raw).Trim()
+    Assert-Equal -Name 'claude ps1 - cwd remains assigned workspace' -Expected $f.Workspace -Actual $writtenCwd
+    Assert-Equal -Name 'claude ps1 - launch plan working directory is workspace' -Expected $f.Workspace -Actual $plan.working_directory
+
+    # stdout/stderr capture preserved
+    $stdoutContent = Get-Content -LiteralPath (Join-Path $runDir "logs/worker.stdout.log") -Raw
+    Assert-True -Name 'claude ps1 - stdout captured' -Condition ($stdoutContent -match "FAKE PS1 WORKER STDOUT")
+    $stderrContent = Get-Content -LiteralPath (Join-Path $runDir "logs/worker.stderr.log") -Raw
+    Assert-True -Name 'claude ps1 - stderr captured' -Condition ($stderrContent -match "FAKE PS1 WORKER STDERR")
+
+    # Budget/USAGE accounting preserved
+    $updatedUsage = Get-Content -LiteralPath (Join-Path $runDir "USAGE.json") -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'claude ps1 - worker_calls incremented' -Expected 1 -Actual $updatedUsage.worker_calls
+
+    # 44. FORM B: Claude resolved as a real executable -> direct execution still works
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+    $argsFile = Join-Path $runDir "args.txt"
+    $cwdFile = Join-Path $runDir "cwd.txt"
+
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_STDOUT = ""
+    $env:FAKE_WORKER_WRITE_ARGS = $argsFile
+    $env:FAKE_WORKER_WRITE_CWD = $cwdFile
+    $env:FAKE_WORKER_WRITE_HOST = ""
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "claude" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    $res = $resRaw | ConvertFrom-Json
+
+    if ($res.result -ne 'COMPLETED') {
+        Write-Host "Test 44 failed. Reason: $($res.reason)"
+    }
+    Assert-Equal -Name 'claude exe - result is COMPLETED' -Expected 'COMPLETED' -Actual $res.result
+
+    $plan = Get-LaunchPlan -RunDirectory $runDir
+    Assert-True -Name 'claude exe - launch plan recorded' -Condition ($null -ne $plan)
+    Assert-True -Name 'claude exe - not detected as PowerShell script' -Condition (-not [bool]$plan.is_powershell_script)
+    Assert-Equal -Name 'claude exe - ProcessStartInfo launches the executable directly' -Expected $fakeWorkerExe -Actual $plan.file_name
+
+    $planArgs = @($plan.arguments)
+    Assert-Equal -Name 'claude exe - argument count is 4' -Expected 4 -Actual $planArgs.Count
+    Assert-Equal -Name 'claude exe - arg 0 is --print' -Expected '--print' -Actual $planArgs[0]
+    Assert-Equal -Name 'claude exe - arg 1 is --output-format' -Expected '--output-format' -Actual $planArgs[1]
+    Assert-Equal -Name 'claude exe - arg 2 is json' -Expected 'json' -Actual $planArgs[2]
+    Assert-True -Name 'claude exe - arg 3 is the bounded prompt' -Condition ($planArgs[3] -match "You are a worker agent executing a bounded task under the AI_ORCHESTRA system")
+
+    Assert-True -Name 'claude exe - prompt is not interactive (--print present)' -Condition ($planArgs -contains '--print')
+    foreach ($flag in $forbiddenWorkerFlags) {
+        Assert-True -Name "claude exe - forbidden flag '$flag' absent" -Condition (-not ($planArgs -contains $flag))
+    }
+
+    Assert-True -Name 'claude exe - executable received args' -Condition (Test-Path -LiteralPath $argsFile)
+    $passedArgs = Get-Content -LiteralPath $argsFile
+    Assert-Equal -Name 'claude exe - executable arg count is 4' -Expected 4 -Actual ([int]$passedArgs[0])
+    Assert-Equal -Name 'claude exe - executable arg 1 is --print' -Expected '--print' -Actual $passedArgs[1]
+
+    $writtenCwd = (Get-Content -LiteralPath $cwdFile -Raw).Trim()
+    Assert-Equal -Name 'claude exe - cwd remains assigned workspace' -Expected $f.Workspace -Actual $writtenCwd
+
+    # 45. No token usage recorded when the process fails before launch
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $usageFile = Join-Path $runDir "USAGE.json"
+
+    $existingUsage = @{
+        task_id           = "task-101"
+        worker_calls      = 0
+        reviewer_calls    = 0
+        correction_rounds = 0
+        runtime_seconds   = 0
+        total_tokens      = 5000
+    }
+    $existingUsage | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $usageFile -Encoding UTF8
+
+    $env:FAKE_WORKER_WRITE_ARGS = ""
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_WRITE_HOST = ""
+    $env:FAKE_WORKER_REPORT_DEST = ""
+    $env:FAKE_WORKER_REPORT_CONTENT = ""
+
+    $resRaw = & $invokeScript -Worker "claude" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $notAnExecutable
+    $res = $resRaw | ConvertFrom-Json
+
+    Assert-Equal -Name 'pre-launch failure - result is FAILED' -Expected 'FAILED' -Actual $res.result
+    Assert-True -Name 'pre-launch failure - exit code is 2' -Condition ($LASTEXITCODE -eq 2)
+
+    $unchangedUsage = Get-Content -LiteralPath $usageFile -Raw | ConvertFrom-Json
+    Assert-Equal -Name 'pre-launch failure - worker_calls not incremented' -Expected 0 -Actual $unchangedUsage.worker_calls
+    Assert-Equal -Name 'pre-launch failure - total_tokens unchanged' -Expected 5000 -Actual $unchangedUsage.total_tokens
+    Assert-Equal -Name 'pre-launch failure - runtime_seconds unchanged' -Expected 0 -Actual $unchangedUsage.runtime_seconds
+
+    # 46. Gemini launch contract is unchanged by the Claude launcher fix
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $reportFile = Join-Path $runDir "WORKER_REPORT.json"
+
+    $env:FAKE_WORKER_EXIT_CODE = "0"
+    $env:FAKE_WORKER_SLEEP_MS = "0"
+    $env:FAKE_WORKER_WRITE_ARGS = ""
+    $env:FAKE_WORKER_WRITE_CWD = ""
+    $env:FAKE_WORKER_WRITE_HOST = ""
+    $env:FAKE_WORKER_STDOUT = '{"conversation_id":"conv-999","status":"SUCCESS","num_turns":1,"usage":{"total_tokens":100}}'
+    $env:FAKE_WORKER_REPORT_DEST = $reportFile
+    $env:FAKE_WORKER_REPORT_CONTENT = '{"status":"completed","files_changed":["src/main.py"],"summary":"Done"}'
+
+    $resRaw = & $invokeScript -Worker "gemini" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    $res = $resRaw | ConvertFrom-Json
+
+    Assert-Equal -Name 'gemini regression - result is COMPLETED' -Expected 'COMPLETED' -Actual $res.result
+
+    $plan = Get-LaunchPlan -RunDirectory $runDir
+    $planArgs = @($plan.arguments)
+    Assert-Equal -Name 'gemini regression - launches executable directly' -Expected $fakeWorkerExe -Actual $plan.file_name
+    Assert-Equal -Name 'gemini regression - argument count is 3' -Expected 3 -Actual $planArgs.Count
+    Assert-Equal -Name 'gemini regression - arg 0 is --output-format' -Expected '--output-format' -Actual $planArgs[0]
+    Assert-Equal -Name 'gemini regression - arg 1 is json' -Expected 'json' -Actual $planArgs[1]
+    Assert-True -Name 'gemini regression - arg 2 is --print=<prompt>' -Condition ($planArgs[2].StartsWith('--print='))
+    foreach ($flag in $forbiddenWorkerFlags) {
+        Assert-True -Name "gemini regression - forbidden flag '$flag' absent" -Condition (-not ($planArgs -contains $flag))
+    }
+
 }
 finally {
     # Reset env variables
@@ -750,6 +1005,7 @@ finally {
     $env:FAKE_WORKER_SLEEP_MS = "0"
     $env:FAKE_WORKER_WRITE_CWD = ""
     $env:FAKE_WORKER_WRITE_ARGS = ""
+    $env:FAKE_WORKER_WRITE_HOST = ""
     $env:FAKE_WORKER_STDOUT = ""
     $env:FAKE_WORKER_REPORT_DEST = ""
     $env:FAKE_WORKER_REPORT_CONTENT = ""
