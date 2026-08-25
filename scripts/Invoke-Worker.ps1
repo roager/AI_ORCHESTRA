@@ -416,6 +416,109 @@ Your instructions:
 9. Do not create unrelated artifacts outside the workspace or run directory.
 "@
 
+# --- 7b. Claude Bounded Contract (AO-CLAUDE-002) ----------------------------
+# Claude workers are confined to the assigned worktree: no additional directories
+# are authorized, so they can neither read TASK.json from the run directory nor
+# write WORKER_REPORT.json there. The Supervisor therefore mediates both ends:
+#   inbound  - the task contract is embedded in the bounded prompt below;
+#   outbound - the report is returned through structured stdout and persisted
+#              to the run directory by this script.
+# This matches WORKER_POLICY section 2 ("Read Assigned Worktree", "Return
+# Structured Reports") without granting any filesystem access outside the worktree.
+
+function ConvertTo-PromptList {
+    param([object] $Value, [string] $Empty = '(none specified)')
+    $items = @()
+    if ($null -ne $Value) {
+        $items = @(@($Value) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    }
+    if (@($items).Count -eq 0) { return $Empty }
+    return ((@($items) | ForEach-Object { "     - $_" }) -join "`n").TrimStart()
+}
+
+function Get-TaskField {
+    param([object] $Task, [string] $Name)
+    if ($null -eq $Task) { return $null }
+    if ($Task.PSObject.Properties.Name -contains $Name) { return $Task.$Name }
+    return $null
+}
+
+$taskObjective  = [string](Get-TaskField -Task $task -Name 'objective')
+$taskAllowed    = ConvertTo-PromptList -Value (Get-TaskField -Task $task -Name 'allowed_paths')       -Empty '(none - do not modify any file)'
+$taskForbidden  = ConvertTo-PromptList -Value (Get-TaskField -Task $task -Name 'forbidden_paths')     -Empty '(none listed)'
+$taskAcceptance = ConvertTo-PromptList -Value (Get-TaskField -Task $task -Name 'acceptance_criteria') -Empty '(none listed)'
+
+$ClaudePrompt = @"
+You are a worker agent executing a bounded task under the AI_ORCHESTRA system.
+
+Your entire task contract is reproduced below. It is authoritative. You do NOT
+need to read TASK.json, and you have no access to any directory other than your
+current working directory.
+
+TASK CONTRACT
+   task_id:   $($task.task_id)
+   branch:    $requestedBranch
+   workspace: $workspaceCanonical
+   objective: $taskObjective
+   allowed_paths:
+     $taskAllowed
+   forbidden_paths:
+     $taskForbidden
+   acceptance_criteria:
+     $taskAcceptance
+
+Your instructions:
+1. Your current working directory IS the assigned workspace. Work only there.
+2. Modify only paths listed under allowed_paths. Never touch forbidden_paths.
+3. NEVER push, merge, force push, modify credentials or secrets, or elevate privileges.
+4. Do not attempt to read or write any location outside the working directory.
+   Such attempts are denied by policy and only waste the run.
+5. Do NOT write a WORKER_REPORT.json file anywhere. Reporting is handled below.
+6. If blocked or uncertain, stop and report status = "blocked" rather than expanding scope.
+
+Reporting:
+   Your FINAL answer must be the structured worker report itself. The full contract
+   is reproduced here; you do NOT need to read any schema or policy file:
+   - "status" (required): exactly one of "completed", "blocked", "failed"
+   - "files_changed" (required): array of repository-relative paths you modified
+   - "summary" (required): concise, non-empty description of what you did
+   - "risks" (optional): array of strings
+   - "questions" (optional): array of strings
+   The Supervisor captures this from your output and persists it. Do not write it to disk.
+"@
+
+# JSON Schema handed to the Claude CLI via --json-schema. Mirrors the required
+# subset of schemas\WORKER_REPORT.schema.json that this script validates below.
+$ClaudeReportSchema = [pscustomobject][ordered]@{
+    type                 = 'object'
+    additionalProperties = $false
+    required             = @('status', 'files_changed', 'summary')
+    properties           = [ordered]@{
+        status        = [ordered]@{ type = 'string'; enum = @('completed', 'blocked', 'failed') }
+        files_changed = [ordered]@{ type = 'array'; items = [ordered]@{ type = 'string'; minLength = 1 } }
+        summary       = [ordered]@{ type = 'string'; minLength = 1 }
+        risks         = [ordered]@{ type = 'array'; items = [ordered]@{ type = 'string'; minLength = 1 } }
+        questions     = [ordered]@{ type = 'array'; items = [ordered]@{ type = 'string'; minLength = 1 } }
+    }
+} | ConvertTo-Json -Depth 10 -Compress
+
+# Least-privilege tool contract for Claude.
+#   - The Claude CLI confines file tools to the working directory unless additional
+#     directories are granted. We grant NONE, so the worktree boundary is structural
+#     and does not depend on getting permission-rule syntax right.
+#   - Bash is denied outright: a shell would defeat that boundary. Deny rules take
+#     precedence over allow rules, so this cannot be widened by a stray allow rule.
+#   - 'dontAsk' auto-DENIES anything not pre-approved. It is the documented
+#     unattended/CI mode and is the opposite of a permission bypass.
+$ClaudePermissionMode  = 'dontAsk'
+$ClaudeAllowedTools    = 'Read,Edit,Write,Glob,Grep'
+$ClaudeDisallowedTools = 'Bash,WebFetch,WebSearch'
+
+# Extension point for controlled experiments (e.g. '--bare' as a cost optimization).
+# Deliberately empty: AO-CLAUDE-003 is a correctness task and must not mix in tuning.
+# Adding a flag here is the only change required to trial one.
+$ClaudeOptionalFlags = @()
+
 # --- 8. Build Deterministic Launch Plan -------------------------------------
 # System.Diagnostics.ProcessStartInfo cannot execute a PowerShell script (.ps1)
 # directly as FileName. On Windows the npm-installed Claude CLI commonly resolves
@@ -473,28 +576,51 @@ if ($isPowerShellScript) {
 }
 
 if ($workerClean -eq 'gemini') {
+    # Gemini's contract is unchanged.
     $null = $launchArguments.Add("--output-format")
     $null = $launchArguments.Add("json")
     $null = $launchArguments.Add("--print=$Prompt")
 } else {
-    # Claude's documented non-interactive contract.
+    # Claude's documented non-interactive contract, plus the least-privilege
+    # permission contract. No --add-dir: the worktree boundary is the sandbox.
     $null = $launchArguments.Add("--print")
     $null = $launchArguments.Add("--output-format")
     $null = $launchArguments.Add("json")
-    $null = $launchArguments.Add($Prompt)
+    $null = $launchArguments.Add("--json-schema")
+    $null = $launchArguments.Add($ClaudeReportSchema)
+    $null = $launchArguments.Add("--permission-mode")
+    $null = $launchArguments.Add($ClaudePermissionMode)
+    $null = $launchArguments.Add("--allowedTools")
+    $null = $launchArguments.Add($ClaudeAllowedTools)
+    $null = $launchArguments.Add("--disallowedTools")
+    $null = $launchArguments.Add($ClaudeDisallowedTools)
+    foreach ($optionalFlag in @($ClaudeOptionalFlags)) {
+        $null = $launchArguments.Add($optionalFlag)
+    }
+    # The bounded prompt is always the final positional argument.
+    $null = $launchArguments.Add($ClaudePrompt)
 }
 
 # Record the resolved launch plan for auditability before any process is started.
 $launchPlanPath = Join-Path $logDir "worker.launch.json"
 try {
-    [pscustomobject][ordered]@{
-        worker            = $workerClean
-        resolved_command  = $executable
+    $planData = [ordered]@{
+        worker               = $workerClean
+        resolved_command     = $executable
         is_powershell_script = $isPowerShellScript
-        file_name         = $launchFileName
-        arguments         = @($launchArguments)
-        working_directory = $workspaceCanonical
-    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $launchPlanPath -Encoding UTF8
+        file_name            = $launchFileName
+        arguments            = @($launchArguments)
+        working_directory    = $workspaceCanonical
+        # Explicitly empty: no filesystem location outside the worktree is authorized.
+        additional_directories = @()
+    }
+    if ($workerClean -eq 'claude') {
+        $planData["permission_mode"]   = $ClaudePermissionMode
+        $planData["allowed_tools"]     = $ClaudeAllowedTools
+        $planData["disallowed_tools"]  = $ClaudeDisallowedTools
+        $planData["report_transport"]  = 'structured_stdout'
+    }
+    [pscustomobject]$planData | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $launchPlanPath -Encoding UTF8
 }
 catch {
     # Auditing artifact only; never block the invocation on it.
@@ -623,6 +749,132 @@ if ($workerClean -eq 'gemini' -and -not [string]::IsNullOrWhiteSpace($stdoutText
     }
 }
 
+# --- Parse Claude Structured Stdout (AO-CLAUDE-002) ---
+# Envelope shape verified against the installed Claude CLI (2.1.241):
+#   { type, subtype, is_error, num_turns, result, session_id, total_cost_usd,
+#     usage: { input_tokens, output_tokens, cache_creation_input_tokens,
+#              cache_read_input_tokens, output_tokens_details: { thinking_tokens } },
+#     modelUsage: {...}, permission_denials: [...], structured_output?: {...} }
+$claudeStdoutData        = $null
+$claudeStdoutParseError  = $null
+$claudeIsError           = $false
+$claudeSubtype           = $null
+$claudePermissionDenials = @()
+$claudeReport            = $null
+$claudeReportSource      = $null
+$claudeReportMalformed   = $false
+$claudeSessionId         = $null
+$claudeDurationApiMs     = $null
+$claudeTotalCostUsd      = $null
+$claudeModelUsage        = $null
+$claudeInputTokens       = $null
+$claudeOutputTokens      = $null
+$claudeCacheCreateTokens = $null
+$claudeCacheReadTokens   = $null
+$claudeThinkingTokens    = $null
+
+if ($workerClean -eq 'claude' -and -not [string]::IsNullOrWhiteSpace($stdoutText)) {
+    try {
+        $claudeStdoutData = $stdoutText | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        $claudeStdoutParseError = $_.Exception.Message
+        $claudeStdoutData = $null
+    }
+}
+
+if ($null -ne $claudeStdoutData) {
+    $names = $claudeStdoutData.PSObject.Properties.Name
+
+    if ($names -contains 'session_id')     { $claudeSessionId     = $claudeStdoutData.session_id }
+    if ($names -contains 'num_turns')      { $numTurns             = $claudeStdoutData.num_turns }
+    if ($names -contains 'subtype')        { $claudeSubtype        = $claudeStdoutData.subtype }
+    if ($names -contains 'duration_api_ms'){ $claudeDurationApiMs  = $claudeStdoutData.duration_api_ms }
+    if ($names -contains 'total_cost_usd') { $claudeTotalCostUsd   = $claudeStdoutData.total_cost_usd }
+    if ($names -contains 'modelUsage')     { $claudeModelUsage     = $claudeStdoutData.modelUsage }
+    if ($names -contains 'is_error' -and $null -ne $claudeStdoutData.is_error) {
+        $claudeIsError = [bool]$claudeStdoutData.is_error
+    }
+    if ($names -contains 'permission_denials' -and $null -ne $claudeStdoutData.permission_denials) {
+        $claudePermissionDenials = @($claudeStdoutData.permission_denials)
+    }
+
+    # --- Token accounting ---
+    # AI_ORCHESTRA total_tokens is defined by USAGE.schema.json as "Total observed
+    # token consumption". Claude reports four disjoint counters, all of which are
+    # tokens the model actually processed, so all four are summed:
+    #     input + cache_creation_input + cache_read_input + output
+    # output_tokens_details.thinking_tokens is a BREAKDOWN of output_tokens, not an
+    # additional counter, so it is reported but never added (that would double-count).
+    if ($names -contains 'usage' -and $null -ne $claudeStdoutData.usage) {
+        $cu = $claudeStdoutData.usage
+        $cuNames = $cu.PSObject.Properties.Name
+        $claudeTotal = 0
+        $sawAny = $false
+
+        if ($cuNames -contains 'input_tokens' -and $null -ne $cu.input_tokens) {
+            $claudeInputTokens = [int]$cu.input_tokens
+            $claudeTotal += $claudeInputTokens; $sawAny = $true
+        }
+        if ($cuNames -contains 'cache_creation_input_tokens' -and $null -ne $cu.cache_creation_input_tokens) {
+            $claudeCacheCreateTokens = [int]$cu.cache_creation_input_tokens
+            $claudeTotal += $claudeCacheCreateTokens; $sawAny = $true
+        }
+        if ($cuNames -contains 'cache_read_input_tokens' -and $null -ne $cu.cache_read_input_tokens) {
+            $claudeCacheReadTokens = [int]$cu.cache_read_input_tokens
+            $claudeTotal += $claudeCacheReadTokens; $sawAny = $true
+        }
+        if ($cuNames -contains 'output_tokens' -and $null -ne $cu.output_tokens) {
+            $claudeOutputTokens = [int]$cu.output_tokens
+            $claudeTotal += $claudeOutputTokens; $sawAny = $true
+        }
+        if ($cuNames -contains 'output_tokens_details' -and $null -ne $cu.output_tokens_details) {
+            $otd = $cu.output_tokens_details
+            if ($otd.PSObject.Properties.Name -contains 'thinking_tokens' -and $null -ne $otd.thinking_tokens) {
+                $claudeThinkingTokens = [int]$otd.thinking_tokens
+            }
+        }
+
+        if ($sawAny) {
+            $totalTokens = $claudeTotal
+            $hasTokens = $true
+        }
+    }
+
+    # --- Report transport: structured stdout ---
+    # structured_output is the ONLY authoritative task result. A top-level
+    # exit_code 0 / subtype 'success' / terminal_reason 'completed' says the CLI
+    # session ended cleanly; it says nothing about whether the assigned task
+    # succeeded, and is never treated as proof of one.
+    if ($names -contains 'structured_output' -and $null -ne $claudeStdoutData.structured_output) {
+        $candidate = $claudeStdoutData.structured_output
+        if ($candidate -is [string]) {
+            # Some builds hand back the structured answer as a JSON string.
+            try { $candidate = ([string]$candidate).Trim() | ConvertFrom-Json -ErrorAction Stop }
+            catch { $candidate = $null }
+        }
+        if ($null -ne $candidate -and $candidate -is [pscustomobject]) {
+            $claudeReport = $candidate
+            $claudeReportSource = 'structured_output'
+        }
+        else {
+            # Present but not an object: malformed. Falls through to INVALID_OUTPUT.
+            $claudeReportMalformed = $true
+        }
+    }
+}
+
+# Persist the returned report to the run directory. The worker never writes here;
+# the Supervisor owns this file, which keeps every downstream check unchanged.
+if ($workerClean -eq 'claude' -and $null -ne $claudeReport -and -not (Test-Path -LiteralPath $reportFile)) {
+    try {
+        $claudeReport | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportFile -Encoding UTF8
+    }
+    catch {
+        $claudeReportSource = $null
+    }
+}
+
 # --- Usage Accounting ---
 $usagePath = Join-Path $runDirCanonical "USAGE.json"
 if (Test-Path -LiteralPath $usagePath -PathType Leaf) {
@@ -715,7 +967,23 @@ function Write-ResultAndExit {
         if ($null -ne $thinkingTokens)   { $resultData["thinking_tokens"]   = $thinkingTokens }
         if ($null -ne $totalTokens)      { $resultData["total_tokens"]      = $totalTokens }
     }
-    
+
+    if ($workerClean -eq 'claude') {
+        if ($null -ne $claudeSessionId)         { $resultData["session_id"]                 = $claudeSessionId }
+        if ($null -ne $numTurns)                { $resultData["num_turns"]                  = $numTurns }
+        if ($null -ne $claudeDurationApiMs)     { $resultData["duration_api_ms"]            = $claudeDurationApiMs }
+        if ($null -ne $claudeTotalCostUsd)      { $resultData["total_cost_usd"]             = $claudeTotalCostUsd }
+        if ($null -ne $claudeModelUsage)        { $resultData["model_usage"]                = $claudeModelUsage }
+        if ($null -ne $claudeInputTokens)       { $resultData["input_tokens"]               = $claudeInputTokens }
+        if ($null -ne $claudeCacheCreateTokens) { $resultData["cache_creation_input_tokens"] = $claudeCacheCreateTokens }
+        if ($null -ne $claudeCacheReadTokens)   { $resultData["cache_read_input_tokens"]    = $claudeCacheReadTokens }
+        if ($null -ne $claudeOutputTokens)      { $resultData["output_tokens"]              = $claudeOutputTokens }
+        if ($null -ne $claudeThinkingTokens)    { $resultData["thinking_tokens"]            = $claudeThinkingTokens }
+        if ($hasTokens)                         { $resultData["total_tokens"]               = $totalTokens }
+        if ($null -ne $claudeReportSource)      { $resultData["report_source"]              = $claudeReportSource }
+        $resultData["permission_denial_count"] = @($claudePermissionDenials).Count
+    }
+
     $obj = [pscustomobject]$resultData
     if ($AsJson) {
         $obj | ConvertTo-Json -Compress -Depth 6
@@ -748,9 +1016,40 @@ if ($workerClean -eq 'gemini' -and $geminiCliStatus -eq 'ERROR') {
     Write-ResultAndExit -Verdict "FAILED" -CustomExitCode 2 -CustomReason "Gemini CLI reported error: $geminiCliErrorMsg"
 }
 
+# 4b. Claude stdout valid JSON check
+if ($workerClean -eq 'claude' -and $null -eq $claudeStdoutData) {
+    Write-ResultAndExit -Verdict "INVALID_OUTPUT" -CustomExitCode 2 -CustomReason "Claude stdout is not valid JSON. Parse error: $claudeStdoutParseError"
+}
+
+# 4c. Claude CLI error check
+if ($workerClean -eq 'claude' -and $claudeIsError) {
+    $claudeErrText = ""
+    if ($null -ne $claudeStdoutData -and $claudeStdoutData.PSObject.Properties.Name -contains 'result') {
+        $claudeErrText = [string]$claudeStdoutData.result
+    }
+    Write-ResultAndExit -Verdict "FAILED" -CustomExitCode 2 -CustomReason "Claude CLI reported an error (subtype '$claudeSubtype'): $claudeErrText"
+}
+
 # 5. WORKER_REPORT.json existence check
 if (-not (Test-Path -LiteralPath $reportFile)) {
-    Write-ResultAndExit -Verdict "INVALID_OUTPUT" -CustomExitCode 2 -CustomReason "WORKER_REPORT.json is missing."
+    $missingReason = "WORKER_REPORT.json is missing."
+    if ($workerClean -eq 'claude') {
+        if ($claudeReportMalformed) {
+            $missingReason = "Claude structured_output is malformed: it is not a JSON object matching the WORKER_REPORT contract."
+        }
+        else {
+            $missingReason = "Claude returned no structured_output. A clean CLI exit is not proof the assigned task succeeded."
+        }
+        $denialCount = @($claudePermissionDenials).Count
+        if ($denialCount -gt 0) {
+            # Surface the bounded-access failure precisely instead of a generic miss.
+            $denialTools = @($claudePermissionDenials | ForEach-Object {
+                if ($null -ne $_ -and $_.PSObject.Properties.Name -contains 'tool_name') { [string]$_.tool_name } else { 'unknown' }
+            } | Select-Object -Unique) -join ', '
+            $missingReason += " The worker hit $denialCount permission denial(s) (tools: $denialTools); it may have attempted access outside the assigned worktree."
+        }
+    }
+    Write-ResultAndExit -Verdict "INVALID_OUTPUT" -CustomExitCode 2 -CustomReason $missingReason
 }
 
 # 6. Parse WORKER_REPORT.json
