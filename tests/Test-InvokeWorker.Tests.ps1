@@ -902,13 +902,14 @@ try {
     Assert-True -Name 'claude ps1 - FileName is not the .ps1' -Condition (([string]$plan.file_name) -ne $fakeClaudePs1)
 
     $planArgs = @($plan.arguments)
-    Assert-Equal -Name 'claude ps1 - argument count is 15' -Expected 15 -Actual $planArgs.Count
+    Assert-Equal -Name 'claude ps1 - argument count is 16' -Expected 16 -Actual $planArgs.Count
     Assert-Equal -Name 'claude ps1 - arg 0 is -NoProfile' -Expected '-NoProfile' -Actual $planArgs[0]
     Assert-Equal -Name 'claude ps1 - arg 1 is -File' -Expected '-File' -Actual $planArgs[1]
     Assert-Equal -Name 'claude ps1 - arg 2 is the claude.ps1 path' -Expected $fakeClaudePs1 -Actual $planArgs[2]
     Assert-Equal -Name 'claude ps1 - arg 3 is --print' -Expected '--print' -Actual $planArgs[3]
     Assert-Equal -Name 'claude ps1 - arg 4 is --output-format' -Expected '--output-format' -Actual $planArgs[4]
     Assert-Equal -Name 'claude ps1 - arg 5 is json' -Expected 'json' -Actual $planArgs[5]
+    Assert-Equal -Name 'claude ps1 - option parsing is terminated by -- before the prompt' -Expected '--' -Actual $planArgs[-2]
     Assert-True -Name 'claude ps1 - last arg is the bounded prompt' -Condition ($planArgs[-1] -match "You are a worker agent executing a bounded task under the AI_ORCHESTRA system")
 
     # Non-interactive contract: --print present, no dangerous or session-resuming flags
@@ -920,7 +921,7 @@ try {
     # The pwsh host really did run the script, and only the CLI args reached it
     Assert-True -Name 'claude ps1 - script received args' -Condition (Test-Path -LiteralPath $argsFile)
     $passedArgs = Get-Content -LiteralPath $argsFile
-    Assert-Equal -Name 'claude ps1 - script arg count is 12' -Expected 12 -Actual ([int]$passedArgs[0])
+    Assert-Equal -Name 'claude ps1 - script arg count is 13' -Expected 13 -Actual ([int]$passedArgs[0])
     Assert-Equal -Name 'claude ps1 - script arg 1 is --print' -Expected '--print' -Actual $passedArgs[1]
     Assert-Equal -Name 'claude ps1 - script arg 2 is --output-format' -Expected '--output-format' -Actual $passedArgs[2]
     Assert-Equal -Name 'claude ps1 - script arg 3 is json' -Expected 'json' -Actual $passedArgs[3]
@@ -973,10 +974,11 @@ try {
     Assert-Equal -Name 'claude exe - ProcessStartInfo launches the executable directly' -Expected $fakeWorkerExe -Actual $plan.file_name
 
     $planArgs = @($plan.arguments)
-    Assert-Equal -Name 'claude exe - argument count is 12' -Expected 12 -Actual $planArgs.Count
+    Assert-Equal -Name 'claude exe - argument count is 13' -Expected 13 -Actual $planArgs.Count
     Assert-Equal -Name 'claude exe - arg 0 is --print' -Expected '--print' -Actual $planArgs[0]
     Assert-Equal -Name 'claude exe - arg 1 is --output-format' -Expected '--output-format' -Actual $planArgs[1]
     Assert-Equal -Name 'claude exe - arg 2 is json' -Expected 'json' -Actual $planArgs[2]
+    Assert-Equal -Name 'claude exe - option parsing is terminated by -- before the prompt' -Expected '--' -Actual $planArgs[-2]
     Assert-True -Name 'claude exe - last arg is the bounded prompt' -Condition ($planArgs[-1] -match "You are a worker agent executing a bounded task under the AI_ORCHESTRA system")
 
     Assert-True -Name 'claude exe - prompt is not interactive (--print present)' -Condition ($planArgs -contains '--print')
@@ -986,7 +988,7 @@ try {
 
     Assert-True -Name 'claude exe - executable received args' -Condition (Test-Path -LiteralPath $argsFile)
     $passedArgs = Get-Content -LiteralPath $argsFile
-    Assert-Equal -Name 'claude exe - executable arg count is 12' -Expected 12 -Actual ([int]$passedArgs[0])
+    Assert-Equal -Name 'claude exe - executable arg count is 13' -Expected 13 -Actual ([int]$passedArgs[0])
     Assert-Equal -Name 'claude exe - executable arg 1 is --print' -Expected '--print' -Actual $passedArgs[1]
 
     $writtenCwd = (Get-Content -LiteralPath $cwdFile -Raw).Trim()
@@ -1479,6 +1481,129 @@ try {
     Assert-True -Name 'cost experiment - --bare is not enabled in this task' -Condition (-not ($planArgs -contains '--bare'))
     Assert-True -Name 'cost experiment - bounded prompt is still the final argument' `
         -Condition ($planArgs[-1] -match 'You are a worker agent executing a bounded task under the AI_ORCHESTRA system')
+
+    # =======================================================================
+    # CLAUDE PROMPT BINDING (63 - 64)   [AO-CLAUDE-004]
+    # =======================================================================
+    # Real smoke claude-smoke-004 failed before task execution with:
+    #   "Input must be provided either through stdin or as a prompt argument
+    #    when using --print"
+    # Cause: --allowedTools / --disallowedTools are VARIADIC (<tools...>) in the
+    # Claude CLI, so a bare trailing positional prompt is absorbed into the
+    # preceding option's value list and the CLI sees no prompt at all.
+    # Fix: '--' terminates option parsing immediately before the prompt.
+
+    # Hostile task data: spaces, double and single quotes, Windows backslashes,
+    # and tokens that look like CLI options.
+    $bindingTask = $f.TaskData.Clone()
+    $bindingTask.objective = 'Fix the "quoted" parser''s handling of C:\tmp\a b\c.txt --print --allowedTools Bash'
+    $bindingTask.allowed_paths = @('src\deep path\mod.py', 'tests/api')
+    $bindingTask.forbidden_paths = @('.github\workflows')
+    $bindingTask.acceptance_criteria = @('Handles "quotes" and \backslashes\', 'No --dangerously-skip-permissions is used')
+
+    foreach ($form in @(
+        @{ Name = 'ps1'; Exe = $fakeClaudePs1; PlanCount = 16 },
+        @{ Name = 'exe'; Exe = $fakeWorkerExe;  PlanCount = 13 }
+    )) {
+        $f = New-InvokeWorkerFixture
+        $bindingTask.workspace = $f.Workspace
+        $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $bindingTask
+        $runDir = $f.RunDir
+        $argsFile = Join-Path $runDir "args.txt"
+
+        $env:FAKE_WORKER_EXIT_CODE = "0"
+        $env:FAKE_WORKER_SLEEP_MS = "0"
+        $env:FAKE_WORKER_WRITE_CWD = ""
+        $env:FAKE_WORKER_WRITE_HOST = ""
+        $env:FAKE_WORKER_WRITE_ARGS = $argsFile
+        Set-ClaudeWorkerOutput -Report $claudeCompletedReport
+
+        $resRaw = & $invokeScript -Worker "claude" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $form.Exe
+        $res = $resRaw | ConvertFrom-Json
+        if ($res.result -ne 'COMPLETED') { Write-Host "Binding test ($($form.Name)) failed. Reason: $($res.reason)" }
+        Assert-Equal -Name "binding ($($form.Name)) - run is COMPLETED" -Expected 'COMPLETED' -Actual $res.result
+
+        # --- launch plan shape ---
+        $plan = Get-LaunchPlan -RunDirectory $runDir
+        $planArgs = @($plan.arguments)
+        Assert-Equal -Name "binding ($($form.Name)) - launch plan argument count" -Expected $form.PlanCount -Actual $planArgs.Count
+        Assert-Equal -Name "binding ($($form.Name)) - '--' immediately precedes the prompt" -Expected '--' -Actual $planArgs[-2]
+        Assert-Equal -Name "binding ($($form.Name)) - exactly one '--' terminator" -Expected 1 -Actual (@($planArgs | Where-Object { $_ -eq '--' }).Count)
+
+        # The option immediately before '--' is a VARIADIC option's value. That is
+        # precisely the condition that swallowed the prompt in claude-smoke-004.
+        Assert-Equal -Name "binding ($($form.Name)) - variadic --disallowedTools value sits right before '--'" `
+            -Expected 'Bash,WebFetch,WebSearch' -Actual $planArgs[-3]
+
+        # --- what the process actually received ---
+        Assert-True -Name "binding ($($form.Name)) - fake worker recorded its argv" -Condition (Test-Path -LiteralPath $argsFile)
+        $passedArgs = Get-Content -LiteralPath $argsFile
+        $argc = [int]$passedArgs[0]
+        # pwsh consumes -NoProfile/-File/<script>, so the CLI itself always sees 13.
+        Assert-Equal -Name "binding ($($form.Name)) - process received 13 arguments" -Expected 13 -Actual $argc
+        Assert-Equal -Name "binding ($($form.Name)) - process received '--' as argument 12" -Expected '--' -Actual $passedArgs[12]
+
+        # The prompt must arrive as ONE intact argv entry - never split.
+        $promptArg = $passedArgs[13]
+        Assert-True -Name "binding ($($form.Name)) - prompt arrives as a single argument" `
+            -Condition ($promptArg -match 'You are a worker agent executing a bounded task under the AI_ORCHESTRA system')
+
+        $marker = 'You are a worker agent executing a bounded task'
+        $carriers = @(1..$argc | Where-Object { $passedArgs[$_] -match [regex]::Escape($marker) })
+        Assert-Equal -Name "binding ($($form.Name)) - exactly one argument carries the prompt" -Expected 1 -Actual $carriers.Count
+
+        # --- the prompt survives hostile characters intact ---
+        Assert-True -Name "binding ($($form.Name)) - prompt keeps double quotes" -Condition ($promptArg -match '"quoted"')
+        Assert-True -Name "binding ($($form.Name)) - prompt keeps single quotes" -Condition ($promptArg -match "parser's")
+        Assert-True -Name "binding ($($form.Name)) - prompt keeps Windows backslash paths" -Condition ($promptArg -match [regex]::Escape('C:\tmp\a b\c.txt'))
+        Assert-True -Name "binding ($($form.Name)) - prompt keeps spaces inside paths" -Condition ($promptArg -match [regex]::Escape('src\deep path\mod.py'))
+        Assert-True -Name "binding ($($form.Name)) - prompt keeps option-lookalike text" -Condition ($promptArg -match [regex]::Escape('--print --allowedTools Bash'))
+        Assert-True -Name "binding ($($form.Name)) - prompt keeps forbidden_paths backslashes" -Condition ($promptArg -match [regex]::Escape('.github\workflows'))
+        # The fake worker escapes real newlines as a literal \n, so their presence
+        # proves the multi-line prompt crossed the process boundary intact.
+        Assert-True -Name "binding ($($form.Name)) - prompt keeps its line breaks" -Condition ($promptArg -match '\\n')
+        Assert-True -Name "binding ($($form.Name)) - prompt kept CR characters out of the payload" -Condition ($promptArg -notmatch "`r")
+
+        # --- option-lookalike text in the prompt must not be parsed as options ---
+        # Every element before '--' is part of the fixed contract; nothing from the
+        # task data may leak into the option region.
+        $optionRegion = @($passedArgs[1..12])
+        Assert-True -Name "binding ($($form.Name)) - no task text leaked into the option region" `
+            -Condition (-not (@($optionRegion | Where-Object { $_ -match 'quoted' }).Count))
+
+        # --- permission contract still intact in the real argv ---
+        foreach ($flag in $forbiddenWorkerFlags) {
+            Assert-True -Name "binding ($($form.Name)) - forbidden flag '$flag' absent from argv" -Condition (-not ($optionRegion -contains $flag))
+        }
+        foreach ($mode in $forbiddenPermissionModes) {
+            Assert-True -Name "binding ($($form.Name)) - permission mode '$mode' absent from argv" -Condition (-not ($optionRegion -contains $mode))
+        }
+        Assert-True -Name "binding ($($form.Name)) - --permission-mode dontAsk survives" `
+            -Condition (($optionRegion -contains '--permission-mode') -and ($optionRegion -contains 'dontAsk'))
+        Assert-True -Name "binding ($($form.Name)) - --allowedTools survives" -Condition ($optionRegion -contains 'Read,Edit,Write,Glob,Grep')
+        Assert-True -Name "binding ($($form.Name)) - --disallowedTools survives" -Condition ($optionRegion -contains 'Bash,WebFetch,WebSearch')
+        Assert-True -Name "binding ($($form.Name)) - --json-schema survives" -Condition ($optionRegion -contains '--json-schema')
+        Assert-True -Name "binding ($($form.Name)) - --output-format json survives" `
+            -Condition (($optionRegion -contains '--output-format') -and ($optionRegion -contains 'json'))
+        Assert-True -Name "binding ($($form.Name)) - --add-dir still never passed" -Condition (-not ($optionRegion -contains '--add-dir'))
+    }
+
+    # 64. The terminator must stay last: any future entry in $ClaudeOptionalFlags
+    #     has to land BEFORE '--', otherwise the swallowing bug returns.
+    $f = New-InvokeWorkerFixture
+    $taskFile = New-TestJsonFile -Directory $f.TmpDir -FileName "TASK.json" -Data $f.TaskData
+    $runDir = $f.RunDir
+    $env:FAKE_WORKER_WRITE_ARGS = ""
+    Set-ClaudeWorkerOutput -Report $claudeCompletedReport
+    $null = & $invokeScript -Worker "claude" -TaskFile $taskFile -Workspace $f.Workspace -RunDirectory $runDir -AsJson -OverrideExecutablePath $fakeWorkerExe
+    $planArgs = @((Get-LaunchPlan -RunDirectory $runDir).arguments)
+
+    $terminatorIndex = [array]::IndexOf($planArgs, '--')
+    Assert-Equal -Name 'terminator - is the second-to-last argument' -Expected ($planArgs.Count - 2) -Actual $terminatorIndex
+    Assert-True  -Name 'terminator - nothing option-like follows it' `
+        -Condition (@($planArgs[($terminatorIndex + 1)..($planArgs.Count - 1)]).Count -eq 1)
+    Assert-True  -Name 'terminator - --print stays inside the option region' `
+        -Condition ([array]::IndexOf($planArgs, '--print') -lt $terminatorIndex)
 
 }
 finally {

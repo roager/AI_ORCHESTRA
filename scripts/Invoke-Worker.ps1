@@ -597,7 +597,17 @@ if ($workerClean -eq 'gemini') {
     foreach ($optionalFlag in @($ClaudeOptionalFlags)) {
         $null = $launchArguments.Add($optionalFlag)
     }
-    # The bounded prompt is always the final positional argument.
+    # AO-CLAUDE-004: '--' terminates option parsing.
+    # --allowedTools / --disallowedTools are VARIADIC (<tools...>) in the Claude CLI,
+    # so a bare trailing positional prompt is absorbed into the preceding option's
+    # value list. The CLI then sees no prompt and exits with:
+    #   "Input must be provided either through stdin or as a prompt argument when using --print"
+    # The '--' separator makes everything after it positional, which fixes the binding
+    # and permanently immunises it against any option added above (including
+    # $ClaudeOptionalFlags). Verified against Claude CLI 2.1.241, and verified to
+    # survive the 'pwsh -NoProfile -File claude.ps1' wrapper without being stripped.
+    $null = $launchArguments.Add("--")
+    # The bounded prompt is always the final argument, passed as ONE intact argv entry.
     $null = $launchArguments.Add($ClaudePrompt)
 }
 
